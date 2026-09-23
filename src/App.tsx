@@ -1600,6 +1600,7 @@ function App() {
     connected,
     setConnected,
   ] = useState(Boolean(getStoredAdminToken()));
+  const [sessionValidated, setSessionValidated] = useState(false);
 
   const [
     toast,
@@ -2924,17 +2925,11 @@ function App() {
       setGlobalLoading(true);
 
       try {
-        await Promise.all([
-          loadDashboard(),
-          loadDrivers(),
-          loadBookings(),
-          loadCustomers(),
-          loadSafety(),
-          loadAdmins(),
-          loadRoles(),
-          loadAuditLogs(),
-          loadQuickLocations(),
-        ]);
+        // Avoid an AuthSession/DB connection burst during startup.
+        await loadDashboard();
+        await Promise.all([loadDrivers(), loadBookings(), loadCustomers()]);
+        await Promise.all([loadSafety(), loadAdmins(), loadRoles()]);
+        await Promise.all([loadAuditLogs(), loadQuickLocations()]);
       } finally {
         setGlobalLoading(false);
       }
@@ -2951,10 +2946,41 @@ function App() {
     ]);
 
   useEffect(() => {
-    if (!connected) return;
+    let cancelled = false;
+    const token = getStoredAdminToken();
 
+    if (!token) {
+      setSessionValidated(true);
+      return;
+    }
+
+    void (async () => {
+      try {
+        const response = await fetch(`${effectiveApiBase}/auth/me`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!response.ok) throw new Error("SESSION_INVALID");
+        const data = await response.json().catch(() => ({}));
+        if (!data?.success || String(data?.data?.userType || "").toUpperCase() !== "ADMIN") throw new Error("SESSION_INVALID");
+        if (!cancelled) setConnected(true);
+      } catch {
+        if (!cancelled) {
+          saveStoredAdminToken("");
+          saveStoredAdminId("");
+          setConnected(false);
+        }
+      } finally {
+        if (!cancelled) setSessionValidated(true);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!connected || !sessionValidated) return;
     void runInitialLoad();
-  }, [connected, runInitialLoad]);
+  }, [connected, sessionValidated, runInitialLoad]);
 
   useEffect(() => {
     const handleOnline = () => setBrowserOnline(true);
@@ -3408,6 +3434,7 @@ function App() {
       saveStoredAdminId(userId);
       setAdminUserId(userId);
       setConnected(true);
+      setSessionValidated(true);
       setAdminOtp("");
       setTestOtp("");
       showToast("success", "Admin session established.");
@@ -3415,7 +3442,19 @@ function App() {
     finally { setAdminAuthLoading(false); }
   };
 
-  const handleDisconnect = () => {
+  const handleDisconnect = async () => {
+    const token = getStoredAdminToken();
+    try {
+      if (token) {
+        await fetch(`${effectiveApiBase}/auth/logout`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+        });
+      }
+    } catch {
+      // Client state is still cleared even if the network is unavailable.
+    }
+
     realtimeAbortRef.current?.abort();
     realtimeAbortRef.current = null;
     try {
@@ -8564,9 +8603,11 @@ function App() {
         }`}
       >
         <div className="sidebar-brand">
-          <div className="brand-mark">
-            R
-          </div>
+          <img
+            className="sidebar-brand-logo"
+            src="/assets/ridex-admin-logo.png"
+            alt="RideX Admin"
+          />
 
           {!compactSidebar ? (
             <div>
