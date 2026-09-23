@@ -6,6 +6,7 @@ import React, {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import {
@@ -75,7 +76,9 @@ type Screen =
   | "events"
   | "finance"
   | "security"
-  | "monitoring";
+  | "monitoring"
+  | "kyc"
+  | "routes";
 
 type ApiResponse<T> = {
   success?: boolean;
@@ -328,6 +331,47 @@ type ToastType = "success" | "error" | "info";
 type ToastState = {
   type: ToastType;
   message: string;
+};
+
+type RealtimeStatus =
+  | "offline"
+  | "connecting"
+  | "connected"
+  | "reconnecting";
+
+type RealtimeEventEnvelope = {
+  id: string;
+  type: string;
+  data: unknown;
+  receivedAt: string;
+};
+
+type SharedRoutePoint = {
+  id: string;
+  sequence?: number;
+  name?: string;
+  address?: string;
+  latitude?: number;
+  longitude?: number;
+  active?: boolean;
+};
+
+type SharedRoute = {
+  id: string;
+  name?: string;
+  city?: string | null;
+  cityZoneId?: string | null;
+  selectionMode?: string | null;
+  active?: boolean;
+  directionSector?: string | null;
+  cityZone?: {
+    id?: string;
+    name?: string;
+    city?: string;
+    active?: boolean;
+  } | null;
+  points?: SharedRoutePoint[];
+  [key: string]: unknown;
 };
 
 
@@ -665,6 +709,7 @@ const RIDEX_OPTIONAL_CONFIG = {
 const ADMIN_ID_STORAGE_KEY = "ridex_admin_user_id";
 const ADMIN_AUTH_TOKEN_STORAGE_KEY = "ridex_admin_auth_token_v1";
 const RIDEX_TEST_MODE = String((import.meta as any)?.env?.VITE_RIDEX_TEST_MODE ?? "false").toLowerCase() === "true";
+const ADMIN_LOGIN_PURPOSE = "ADMIN.AUTH.LOGIN";
 
 const ICONS: Record<string, React.ComponentType<{ size?: number; strokeWidth?: number }>> = {
   dashboard: LayoutDashboard, map: MapPin, list: ListChecks, users: Users, driver: CarFront, vehicle: Truck,
@@ -691,15 +736,16 @@ const NAV_ITEMS: Array<{
   { id: "finance", label: "Finance / Settlements", icon: "wallet" },
   { id: "security", label: "Security Center", icon: "roles" },
   { id: "monitoring", label: "Monitoring / Recovery", icon: "database" },
-  { id: "quickRide", label: "Quick Ride Create", icon: "plus" },
   { id: "bookings", label: "Rides", icon: "list" },
   { id: "customers", label: "Users / Customers", icon: "users" },
   { id: "drivers", label: "Drivers", icon: "driver" },
+  { id: "kyc", label: "KYC / Documents", icon: "file" },
   { id: "vehicles", label: "Vehicles / E-Rickshaws", icon: "vehicle" },
   { id: "payments", label: "Payments", icon: "payment" },
   { id: "reports", label: "Reports & Analytics", icon: "chart" },
   { id: "pricing", label: "Pricing & Commission", icon: "percent" },
   { id: "quickLocations", label: "Quick Locations", icon: "map" },
+  { id: "routes", label: "Shared Ride Routes", icon: "route" },
   { id: "promotions", label: "Promotions", icon: "promo" },
   { id: "support", label: "Support & Disputes", icon: "support" },
   { id: "safety", label: "Safety / SOS", icon: "safety" },
@@ -1261,16 +1307,280 @@ function PaginationInfo({
   );
 }
 
+
+function LiveOperationsMap({
+  drivers,
+  bookings,
+  onDriverClick,
+}: {
+  drivers: Driver[];
+  bookings: Booking[];
+  onDriverClick: (driverId: string) => void;
+}) {
+  const onlineDrivers = drivers
+    .filter((driver) =>
+      ["ONLINE", "ON_TRIP"].includes(
+        String(driver.driverStatus ?? "").toUpperCase(),
+      ),
+    )
+    .filter(
+      (driver) =>
+        Number.isFinite(driver.location?.latitude) &&
+        Number.isFinite(driver.location?.longitude),
+    )
+    .slice(0, 18);
+
+  const activeStatuses = new Set([
+    "MATCHING",
+    "DRIVER_ASSIGNED",
+    "DRIVER_ARRIVING",
+    "DRIVER_ARRIVED",
+    "STARTED",
+    "IN_PROGRESS",
+    "AT_RISK",
+  ]);
+
+  const activeBookings = bookings
+    .filter((booking) =>
+      activeStatuses.has(String(booking.status ?? "").toUpperCase()),
+    )
+    .slice(0, 12);
+
+  const points: Array<{ lat: number; lng: number }> = [];
+
+  for (const driver of onlineDrivers) {
+    const lat = Number(driver.location?.latitude);
+    const lng = Number(driver.location?.longitude);
+    if (Number.isFinite(lat) && Number.isFinite(lng)) {
+      points.push({ lat, lng });
+    }
+  }
+
+  for (const booking of activeBookings) {
+    const pickupLat = Number(booking.pickupLatitude);
+    const pickupLng = Number(booking.pickupLongitude);
+    const dropLat = Number(booking.dropLatitude);
+    const dropLng = Number(booking.dropLongitude);
+
+    if (Number.isFinite(pickupLat) && Number.isFinite(pickupLng)) {
+      points.push({ lat: pickupLat, lng: pickupLng });
+    }
+    if (Number.isFinite(dropLat) && Number.isFinite(dropLng)) {
+      points.push({ lat: dropLat, lng: dropLng });
+    }
+
+    for (const leg of safeArray<BookingLeg>(booking.legs)) {
+      const legPickupLat = Number(leg.pickupLatitude);
+      const legPickupLng = Number(leg.pickupLongitude);
+      const legDropLat = Number(leg.dropLatitude);
+      const legDropLng = Number(leg.dropLongitude);
+      if (Number.isFinite(legPickupLat) && Number.isFinite(legPickupLng)) {
+        points.push({ lat: legPickupLat, lng: legPickupLng });
+      }
+      if (Number.isFinite(legDropLat) && Number.isFinite(legDropLng)) {
+        points.push({ lat: legDropLat, lng: legDropLng });
+      }
+    }
+  }
+
+  if (points.length === 0) {
+    return (
+      <div className="live-ops-map empty">
+        <div className="live-ops-map-empty">
+          <MapPin size={24} />
+          <strong>No live coordinates returned</strong>
+          <span>
+            The backend has not returned valid driver/ride coordinates for the
+            current operational window.
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  const minLat = Math.min(...points.map((point) => point.lat));
+  const maxLat = Math.max(...points.map((point) => point.lat));
+  const minLng = Math.min(...points.map((point) => point.lng));
+  const maxLng = Math.max(...points.map((point) => point.lng));
+
+  const latRange = Math.max(maxLat - minLat, 0.0005);
+  const lngRange = Math.max(maxLng - minLng, 0.0005);
+
+  const project = (lat: number, lng: number) => {
+    const x = 40 + ((lng - minLng) / lngRange) * 920;
+    const y = 360 - ((lat - minLat) / latRange) * 300;
+    return { x, y };
+  };
+
+  const projectSafe = (lat: unknown, lng: unknown) => {
+    const numericLat = Number(lat);
+    const numericLng = Number(lng);
+    if (!Number.isFinite(numericLat) || !Number.isFinite(numericLng)) {
+      return null;
+    }
+    return project(numericLat, numericLng);
+  };
+
+  return (
+    <div className="live-ops-map">
+      <div className="live-ops-map-head">
+        <span className="map-badge">{formatNumber(onlineDrivers.length)} online GPS</span>
+        <span className="map-badge">{formatNumber(activeBookings.length)} active rides</span>
+      </div>
+      <svg
+        viewBox="0 0 1000 420"
+        className="live-ops-map-svg"
+        role="img"
+        aria-label="Live RideX operational coordinate map"
+      >
+        <defs>
+          <pattern
+            id="ridex-live-grid"
+            width="50"
+            height="50"
+            patternUnits="userSpaceOnUse"
+          >
+            <path
+              d="M 50 0 L 0 0 0 50"
+              fill="none"
+              stroke="currentColor"
+              strokeOpacity="0.08"
+              strokeWidth="1"
+            />
+          </pattern>
+        </defs>
+        <rect
+          x="0"
+          y="0"
+          width="1000"
+          height="420"
+          rx="18"
+          className="live-ops-map-surface"
+        />
+        <rect
+          x="0"
+          y="0"
+          width="1000"
+          height="420"
+          rx="18"
+          fill="url(#ridex-live-grid)"
+        />
+
+        {activeBookings.map((booking) => {
+          const pickup =
+            projectSafe(
+              booking.pickupLatitude,
+              booking.pickupLongitude,
+            ) ??
+            projectSafe(
+              booking.legs?.[0]?.pickupLatitude,
+              booking.legs?.[0]?.pickupLongitude,
+            );
+          const drop =
+            projectSafe(
+              booking.dropLatitude,
+              booking.dropLongitude,
+            ) ??
+            projectSafe(
+              booking.legs?.[booking.legs.length - 1]?.dropLatitude,
+              booking.legs?.[booking.legs.length - 1]?.dropLongitude,
+            );
+
+          if (!pickup || !drop) return null;
+
+          return (
+            <g key={`ride-route-${booking.id}`}>
+              <line
+                x1={pickup.x}
+                y1={pickup.y}
+                x2={drop.x}
+                y2={drop.y}
+                className="live-ops-route-line"
+              />
+              <circle
+                cx={pickup.x}
+                cy={pickup.y}
+                r="7"
+                className="live-ops-point pickup"
+              />
+              <circle
+                cx={drop.x}
+                cy={drop.y}
+                r="7"
+                className="live-ops-point drop"
+              />
+            </g>
+          );
+        })}
+
+        {onlineDrivers.map((driver) => {
+          const projected = projectSafe(
+            driver.location?.latitude,
+            driver.location?.longitude,
+          );
+          if (!projected) return null;
+
+          return (
+            <g
+              key={`driver-marker-${driver.id}`}
+              className="live-ops-driver-marker"
+              onClick={() => onDriverClick(driver.id)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  onDriverClick(driver.id);
+                }
+              }}
+            >
+              <circle
+                cx={projected.x}
+                cy={projected.y}
+                r="15"
+                className="live-ops-driver-ring"
+              />
+              <circle
+                cx={projected.x}
+                cy={projected.y}
+                r="9"
+                className="live-ops-driver-dot"
+              />
+              <text
+                x={projected.x}
+                y={projected.y + 4}
+                textAnchor="middle"
+                className="live-ops-driver-letter"
+              >
+                D
+              </text>
+              <title>
+                {driver.fullName ?? driver.id} ·{" "}
+                {driver.driverStatus ?? "UNKNOWN"}
+              </title>
+            </g>
+          );
+        })}
+      </svg>
+      <div className="live-ops-map-legend">
+        <span><i className="legend-dot driver" /> Driver</span>
+        <span><i className="legend-dot pickup" /> Pickup</span>
+        <span><i className="legend-dot drop" /> Drop</span>
+        <span className="map-legend-note">Coordinates supplied by backend</span>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [
     currentScreen,
     setCurrentScreen,
   ] = useState<Screen>(() => {
     try {
-      return (
-        (sessionStorage.getItem("ridex-current-screen") as Screen) ||
-        "dashboard"
-      );
+      const stored = sessionStorage.getItem(
+        "ridex-current-screen",
+      ) as Screen | null;
+      return stored === "quickRide" ? "dashboard" : stored || "dashboard";
     } catch {
       return "dashboard";
     }
@@ -1298,6 +1608,7 @@ function App() {
 
   const [adminMobile, setAdminMobile] = useState("");
   const [adminOtp, setAdminOtp] = useState("");
+  const [testOtp, setTestOtp] = useState("");
   const [adminAuthLoading, setAdminAuthLoading] = useState(false);
   const [integrationValues, setIntegrationValues] = useState<Record<string, string>>({});
   const [integrationStatus, setIntegrationStatus] = useState<Record<string, { configured: boolean; updatedAt: string | null }>>({});
@@ -1355,6 +1666,24 @@ function App() {
     compactSidebar,
     setCompactSidebar,
   ] = useState(false);
+
+  const [browserOnline, setBrowserOnline] = useState(
+    typeof navigator === "undefined" ? true : navigator.onLine,
+  );
+  const [realtimeStatus, setRealtimeStatus] =
+    useState<RealtimeStatus>("offline");
+  const [realtimeLastEvent, setRealtimeLastEvent] =
+    useState<RealtimeEventEnvelope | null>(null);
+  const realtimeAbortRef = useRef<AbortController | null>(null);
+  const realtimeLastEventIdRef = useRef<string>(
+    (() => {
+      try {
+        return sessionStorage.getItem("ridex-admin-last-event-id") ?? "";
+      } catch {
+        return "";
+      }
+    })(),
+  );
 
   const [
     mobileNavOpen,
@@ -1592,6 +1921,28 @@ function App() {
   const [pricingRules, setPricingRules] = useState<any[]>([]);
   const [pricingDraft, setPricingDraft] = useState({name:"",serviceType:"PASSENGER",bookingType:"RIDE",rideType:"FULL_RIDE",vehicleType:"E_RICKSHAW",baseFare:"0",perKm:"0",perMinute:"0",minFare:"0",maxFare:"0",multiplier:"1",priority:"0"});
 
+  const [sharedRoutes, setSharedRoutes] = useState<SharedRoute[]>([]);
+  const [sharedRoutesLoading, setSharedRoutesLoading] = useState(false);
+  const [sharedRoutesError, setSharedRoutesError] = useState("");
+  const [selectedSharedRoute, setSelectedSharedRoute] =
+    useState<SharedRoute | null>(null);
+  const [sharedRouteSaving, setSharedRouteSaving] = useState(false);
+  const [sharedRouteDraft, setSharedRouteDraft] = useState({
+    name: "",
+    city: "",
+    cityZoneId: "",
+    selectionMode: "AUTO_NEAREST",
+    active: false,
+  });
+
+  const [kycDocumentFilter, setKycDocumentFilter] = useState("");
+
+  const [selectedSupportCase, setSelectedSupportCase] = useState<any | null>(null);
+  const [supportCaseLoading, setSupportCaseLoading] = useState(false);
+  const [supportReply, setSupportReply] = useState("");
+  const [supportAttachmentUrl, setSupportAttachmentUrl] = useState("");
+  const [supportReplyLoading, setSupportReplyLoading] = useState(false);
+
   const [
     serverMessage,
     setServerMessage,
@@ -1625,7 +1976,7 @@ function App() {
   const apiRequest = useCallback(
     async <T,>(
       path: string,
-      options?: RequestInit
+      options?: RequestInit,
     ) => {
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
@@ -1634,30 +1985,92 @@ function App() {
       const token = getStoredAdminToken();
       if (token) headers.Authorization = `Bearer ${token}`;
 
-      const response = await fetch(
-        `${effectiveApiBase}${path}`,
-        {
-          cache: "no-store",
-          ...options,
-          headers: {
-            ...headers,
-            ...(options?.headers ?? {}),
-          },
-        }
-      );
+      const method = String(options?.method ?? "GET").toUpperCase();
+      const retryable = method === "GET" || method === "HEAD";
+      const maxAttempts = retryable ? 2 : 1;
 
-      if (response.status === 401) {
-        saveStoredAdminToken("");
-        saveStoredAdminId("");
-        setAdminUserId("");
-        setConnected(false);
-        showToast("error", "Admin session expired or is invalid. Please sign in again.");
-        throw new Error("Admin session expired or is invalid.");
+      let lastError: unknown = null;
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        if (typeof navigator !== "undefined" && !navigator.onLine) {
+          setBrowserOnline(false);
+          throw new Error("Network is offline. Check the Admin connection and try again.");
+        }
+
+        const controller = new AbortController();
+        const timeout = window.setTimeout(
+          () => controller.abort(),
+          15_000,
+        );
+
+        try {
+          const response = await fetch(
+            `${effectiveApiBase}${path}`,
+            {
+              cache: "no-store",
+              ...options,
+              signal: controller.signal,
+              headers: {
+                ...headers,
+                ...(options?.headers ?? {}),
+              },
+            },
+          );
+
+          if (response.status === 401) {
+            saveStoredAdminToken("");
+            saveStoredAdminId("");
+            setAdminUserId("");
+            setConnected(false);
+            showToast(
+              "error",
+              "Admin session expired or is invalid. Please sign in again.",
+            );
+            throw new Error("Admin session expired or is invalid.");
+          }
+
+          setBrowserOnline(true);
+          return await readResponse<T>(response);
+        } catch (error) {
+          lastError = error;
+
+          if (
+            error instanceof DOMException &&
+            error.name === "AbortError"
+          ) {
+            throw new Error(
+              `Request timed out after 15 seconds: ${path}`,
+            );
+          }
+
+          if (
+            typeof navigator !== "undefined" &&
+            !navigator.onLine
+          ) {
+            setBrowserOnline(false);
+            throw new Error(
+              "Network connection was lost. Changes were not submitted.",
+            );
+          }
+
+          if (attempt < maxAttempts) {
+            await new Promise((resolve) =>
+              window.setTimeout(resolve, 400 * attempt),
+            );
+            continue;
+          }
+        } finally {
+          window.clearTimeout(timeout);
+        }
       }
 
-      return await readResponse<T>(response);
+      throw (
+        lastError instanceof Error
+          ? lastError
+          : new Error(`Request failed: ${path}`)
+      );
     },
-    [effectiveApiBase, showToast]
+    [effectiveApiBase, showToast],
   );
 
   const loadPlatformState = useCallback(async () => {
@@ -1802,7 +2215,7 @@ function App() {
       const [payments, promotions, support] = await Promise.all([
         apiRequest<any[]>("/admin/payments"),
         apiRequest<any[]>("/admin/promotions"),
-        apiRequest<any[]>("/admin/support/cases"),
+        apiRequest<any[]>("/support/admin/cases"),
       ]);
       setPaymentRows(Array.isArray(payments.data) ? payments.data : []);
       setPromotionRows(Array.isArray(promotions.data) ? promotions.data : []);
@@ -2251,6 +2664,104 @@ function App() {
       }
     }, [apiRequest]);
 
+  const loadSharedRoutes = useCallback(async () => {
+    setSharedRoutesLoading(true);
+    setSharedRoutesError("");
+    try {
+      const response = await apiRequest<SharedRoute[]>(
+        "/admin/shared-routes/routes",
+      );
+      const payload = response.data;
+      const rows = Array.isArray(payload)
+        ? payload
+        : Array.isArray(response.routes)
+          ? (response.routes as SharedRoute[])
+          : [];
+      setSharedRoutes(rows);
+      if (
+        selectedSharedRoute &&
+        rows.some((route) => route.id === selectedSharedRoute.id)
+      ) {
+        const refreshed =
+          rows.find((route) => route.id === selectedSharedRoute.id) ??
+          null;
+        setSelectedSharedRoute(refreshed);
+        if (refreshed) {
+          setSharedRouteDraft({
+            name: String(refreshed.name ?? ""),
+            city: String(refreshed.city ?? ""),
+            cityZoneId: String(refreshed.cityZoneId ?? ""),
+            selectionMode: String(
+              refreshed.selectionMode ?? "AUTO_NEAREST",
+            ),
+            active: Boolean(refreshed.active),
+          });
+        }
+      }
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : String(error);
+      setSharedRoutesError(message);
+    } finally {
+      setSharedRoutesLoading(false);
+    }
+  }, [apiRequest, selectedSharedRoute]);
+
+  const saveSharedRoute = useCallback(async () => {
+    if (!selectedSharedRoute) return;
+
+    const name = sharedRouteDraft.name.trim();
+    if (!name) {
+      showToast("error", "Shared Ride route name is required.");
+      return;
+    }
+
+    setSharedRouteSaving(true);
+    try {
+      await apiRequest(
+        `/admin/shared-routes/routes/${encodeURIComponent(
+          selectedSharedRoute.id,
+        )}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            name,
+            city: sharedRouteDraft.city.trim() || null,
+            cityZoneId: sharedRouteDraft.cityZoneId.trim() || null,
+            selectionMode: sharedRouteDraft.selectionMode,
+            active: Boolean(sharedRouteDraft.active),
+          }),
+        },
+      );
+      showToast("success", "Shared Ride route updated.");
+      await loadSharedRoutes();
+    } catch (error) {
+      showToast(
+        "error",
+        error instanceof Error ? error.message : String(error),
+      );
+    } finally {
+      setSharedRouteSaving(false);
+    }
+  }, [
+    apiRequest,
+    loadSharedRoutes,
+    selectedSharedRoute,
+    sharedRouteDraft,
+    showToast,
+  ]);
+
+  const openSharedRoute = useCallback((route: SharedRoute) => {
+    setSelectedSharedRoute(route);
+    setSharedRouteDraft({
+      name: String(route.name ?? ""),
+      city: String(route.city ?? ""),
+      cityZoneId: String(route.cityZoneId ?? ""),
+      selectionMode: String(route.selectionMode ?? "AUTO_NEAREST"),
+      active: Boolean(route.active),
+    });
+  }, []);
+
   const loadDriverDetails =
     useCallback(
       async (
@@ -2335,6 +2846,79 @@ function App() {
       [apiRequest, showToast]
     );
 
+  const openSupportCase = useCallback(
+    async (caseId: string) => {
+      setSupportCaseLoading(true);
+      try {
+        const response = await apiRequest<any>(
+          `/support/admin/cases/${encodeURIComponent(caseId)}`,
+        );
+        setSelectedSupportCase(response.data ?? null);
+        setSupportReply("");
+        setSupportAttachmentUrl("");
+      } catch (error) {
+        showToast(
+          "error",
+          error instanceof Error ? error.message : String(error),
+        );
+      } finally {
+        setSupportCaseLoading(false);
+      }
+    },
+    [apiRequest, showToast],
+  );
+
+  const sendSupportReply = useCallback(async () => {
+    const caseId = String(selectedSupportCase?.id ?? "").trim();
+    const message = supportReply.trim();
+
+    if (!caseId) {
+      showToast("error", "Select a support case first.");
+      return;
+    }
+    if (!message) {
+      showToast("error", "Reply message is required.");
+      return;
+    }
+
+    setSupportReplyLoading(true);
+    try {
+      await apiRequest(
+        `/support/admin/cases/${encodeURIComponent(caseId)}/messages`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            message,
+            ...(supportAttachmentUrl.trim()
+              ? { attachmentUrl: supportAttachmentUrl.trim() }
+              : {}),
+          }),
+        },
+      );
+
+      showToast("success", "Support reply sent.");
+      setSupportReply("");
+      setSupportAttachmentUrl("");
+      await openSupportCase(caseId);
+      await loadOperationsData();
+    } catch (error) {
+      showToast(
+        "error",
+        error instanceof Error ? error.message : String(error),
+      );
+    } finally {
+      setSupportReplyLoading(false);
+    }
+  }, [
+    apiRequest,
+    loadOperationsData,
+    openSupportCase,
+    selectedSupportCase,
+    showToast,
+    supportAttachmentUrl,
+    supportReply,
+  ]);
+
   const runInitialLoad =
     useCallback(async () => {
       setGlobalLoading(true);
@@ -2373,6 +2957,281 @@ function App() {
   }, [connected, runInitialLoad]);
 
   useEffect(() => {
+    const handleOnline = () => setBrowserOnline(true);
+    const handleOffline = () => setBrowserOnline(false);
+
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, []);
+
+  const refreshForRealtimeEvent = useCallback(
+    (eventType: string) => {
+      const normalized = String(eventType ?? "")
+        .trim()
+        .toUpperCase();
+
+      if (
+        normalized === "DRIVER_ONLINE" ||
+        normalized === "DRIVER_OFFLINE" ||
+        normalized === "GPS_UPDATED"
+      ) {
+        void loadDrivers(true);
+        return;
+      }
+
+      if (
+        normalized.includes("REQUEST_") ||
+        normalized.includes("DRIVER_ARRIVING") ||
+        normalized.includes("DRIVER_ARRIVED") ||
+        normalized.includes("TRIP_") ||
+        normalized === "OTP_VERIFIED" ||
+        normalized === "ROUTE_CHANGED"
+      ) {
+        void loadBookings();
+        void loadDrivers(true);
+        return;
+      }
+
+      if (
+        normalized === "SOS_TRIGGERED" ||
+        normalized.startsWith("SAFETY_") ||
+        normalized.startsWith("INCIDENT_")
+      ) {
+        void loadSafety();
+        void loadDashboard();
+        return;
+      }
+
+      if (
+        normalized === "PAYMENT_COMPLETED" ||
+        normalized.startsWith("PAYMENT_")
+      ) {
+        void loadOperationsData();
+        void loadDashboard();
+      }
+    },
+    [
+      loadBookings,
+      loadDashboard,
+      loadDrivers,
+      loadOperationsData,
+      loadSafety,
+    ],
+  );
+
+  const connectAdminRealtime = useCallback(() => {
+    if (!connected || !adminUserId) {
+      setRealtimeStatus("offline");
+      return () => undefined;
+    }
+
+    let stopped = false;
+    let retryDelayMs = 1_000;
+
+    const resolvedActorId =
+      adminUsers.find(
+        (admin) =>
+          String(admin.id ?? "") === String(adminUserId) ||
+          String(admin.userId ?? "") === String(adminUserId),
+      )?.id ?? adminUserId;
+
+    const parseSseBlock = (block: string) => {
+      let eventId = "";
+      let eventType = "message";
+      const dataLines: string[] = [];
+
+      for (const rawLine of block.split("\n")) {
+        const line = rawLine.replace(/\r$/, "");
+        if (!line || line.startsWith(":")) continue;
+
+        if (line.startsWith("id:")) {
+          eventId = line.slice(3).trim();
+          continue;
+        }
+
+        if (line.startsWith("event:")) {
+          eventType = line.slice(6).trim() || "message";
+          continue;
+        }
+
+        if (line.startsWith("data:")) {
+          dataLines.push(line.slice(5).replace(/^ /, ""));
+        }
+      }
+
+      if (dataLines.length === 0) return null;
+
+      let parsedData: unknown = dataLines.join("\n");
+      try {
+        parsedData = JSON.parse(dataLines.join("\n"));
+      } catch {
+        // Keep non-JSON payload as plain text.
+      }
+
+      return {
+        id: eventId,
+        type: eventType,
+        data: parsedData,
+      };
+    };
+
+    const wait = (delay: number) =>
+      new Promise<void>((resolve) => {
+        window.setTimeout(resolve, delay);
+      });
+
+    const run = async () => {
+      while (!stopped) {
+        if (
+          typeof navigator !== "undefined" &&
+          !navigator.onLine
+        ) {
+          setBrowserOnline(false);
+          setRealtimeStatus("offline");
+          await wait(Math.min(retryDelayMs, 15_000));
+          continue;
+        }
+
+        setRealtimeStatus(
+          retryDelayMs === 1_000 ? "connecting" : "reconnecting",
+        );
+
+        const controller = new AbortController();
+        realtimeAbortRef.current = controller;
+
+        try {
+          const lastEventId = realtimeLastEventIdRef.current;
+          const headers: Record<string, string> = {
+            Accept: "text/event-stream",
+            Authorization: `Bearer ${getStoredAdminToken()}`,
+            "Cache-Control": "no-cache",
+          };
+
+          if (lastEventId) {
+            headers["Last-Event-ID"] = lastEventId;
+          }
+
+          const response = await fetch(
+            `${effectiveApiBase}/realtime/stream?actorType=ADMIN&actorId=${encodeURIComponent(
+              resolvedActorId,
+            )}`,
+            {
+              method: "GET",
+              headers,
+              cache: "no-store",
+              signal: controller.signal,
+            },
+          );
+
+          if (response.status === 401 || response.status === 403) {
+            saveStoredAdminToken("");
+            saveStoredAdminId("");
+            setAdminUserId("");
+            setConnected(false);
+            setRealtimeStatus("offline");
+            showToast(
+              "error",
+              "Realtime authorization expired. Please sign in again.",
+            );
+            break;
+          }
+
+          if (!response.ok || !response.body) {
+            throw new Error(
+              `Realtime stream failed (${response.status})`,
+            );
+          }
+
+          setBrowserOnline(true);
+          setRealtimeStatus("connected");
+          retryDelayMs = 1_000;
+
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+
+          while (!stopped) {
+            const { value, done } = await reader.read();
+            if (done) {
+              throw new Error("Realtime stream closed.");
+            }
+
+            buffer += decoder.decode(value, { stream: true });
+            buffer = buffer.replace(/\r\n/g, "\n");
+
+            let separatorIndex = buffer.indexOf("\n\n");
+            while (separatorIndex >= 0) {
+              const block = buffer.slice(0, separatorIndex);
+              buffer = buffer.slice(separatorIndex + 2);
+
+              const parsed = parseSseBlock(block);
+              if (parsed) {
+                if (parsed.id) {
+                  realtimeLastEventIdRef.current = parsed.id;
+                  try {
+                    sessionStorage.setItem(
+                      "ridex-admin-last-event-id",
+                      parsed.id,
+                    );
+                  } catch {
+                    // Ignore session-storage failures.
+                  }
+                }
+
+                const envelope: RealtimeEventEnvelope = {
+                  id:
+                    parsed.id ||
+                    `${Date.now()}-${Math.random()
+                      .toString(36)
+                      .slice(2, 8)}`,
+                  type: parsed.type,
+                  data: parsed.data,
+                  receivedAt: new Date().toISOString(),
+                };
+
+                setRealtimeLastEvent(envelope);
+                refreshForRealtimeEvent(parsed.type);
+              }
+
+              separatorIndex = buffer.indexOf("\n\n");
+            }
+          }
+        } catch (error) {
+          if (stopped || controller.signal.aborted) break;
+
+          setRealtimeStatus("reconnecting");
+          await wait(Math.min(retryDelayMs, 15_000));
+          retryDelayMs = Math.min(retryDelayMs * 2, 15_000);
+        }
+      }
+
+      if (!stopped) {
+        setRealtimeStatus("offline");
+      }
+    };
+
+    void run();
+
+    return () => {
+      stopped = true;
+      realtimeAbortRef.current?.abort();
+      realtimeAbortRef.current = null;
+    };
+  }, [
+    adminUserId,
+    adminUsers,
+    connected,
+    effectiveApiBase,
+    refreshForRealtimeEvent,
+    showToast,
+  ]);
+
+  useEffect(() => {
     if (!connected) return;
 
     const refreshLiveData = () => {
@@ -2390,7 +3249,7 @@ function App() {
       }
     };
 
-    const timer = window.setInterval(refreshLiveData, 5000);
+    const timer = window.setInterval(refreshLiveData, realtimeStatus === "connected" ? 30000 : 12000);
     return () => window.clearInterval(timer);
   }, [
     connected,
@@ -2399,11 +3258,29 @@ function App() {
     loadBookings,
     loadDrivers,
     loadSafety,
+    realtimeStatus,
   ]);
 
   useEffect(() => {
     if (connected && currentScreen === "settings") void loadIntegrationStatus();
   }, [connected, currentScreen, loadIntegrationStatus]);
+
+  useEffect(() => {
+    if (connected && currentScreen === "routes") {
+      void loadSharedRoutes();
+    }
+  }, [connected, currentScreen, loadSharedRoutes]);
+
+  useEffect(() => {
+    if (!connected) {
+      setRealtimeStatus("offline");
+      realtimeAbortRef.current?.abort();
+      return;
+    }
+
+    const cleanup = connectAdminRealtime();
+    return cleanup;
+  }, [connected, connectAdminRealtime]);
 
   useEffect(() => {
     if (connected && currentScreen === "setup" && RIDEX_TEST_MODE) void loadTestData();
@@ -2447,15 +3324,73 @@ function App() {
 
   const sendAdminOtp = async () => {
     const mobile = adminMobile.replace(/\D/g, "").slice(-10);
-    if (!/^\d{10}$/.test(mobile)) { showToast("error", "Enter a valid 10-digit admin mobile number."); return; }
+
+    if (!/^\d{10}$/.test(mobile)) {
+      showToast(
+        "error",
+        "Enter a valid 10-digit admin mobile number.",
+      );
+      return;
+    }
+
     setAdminAuthLoading(true);
+    setTestOtp("");
+
     try {
-      const response = await fetch(`${effectiveApiBase}/auth/send-otp`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mobile, userType: "ADMIN" }) });
+      const response = await fetch(
+        `${effectiveApiBase}/auth/send-otp`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            mobile,
+            userType: "ADMIN",
+            purposeCode: ADMIN_LOGIN_PURPOSE,
+          }),
+        },
+      );
+
       const data = await response.json().catch(() => ({}));
-      if (!response.ok || data.success === false) throw new Error(data.message || "Unable to send admin OTP");
-      showToast("success", "Admin OTP request accepted. Check the configured OTP delivery channel.");
-    } catch (error) { showToast("error", error instanceof Error ? error.message : "Unable to send admin OTP"); }
-    finally { setAdminAuthLoading(false); }
+
+      if (!response.ok || data.success === false) {
+        throw new Error(
+          data.message || "Unable to send admin OTP",
+        );
+      }
+
+      const generatedTestOtp = String(
+        data.testOtp ?? "",
+      ).trim();
+
+      /*
+       * The backend is the source of truth. In TEST it returns testOtp.
+       * Do not require VITE_RIDEX_TEST_MODE just to render the returned OTP,
+       * because a deployed frontend can otherwise hide a valid TEST response.
+       * The backend never returns testOtp in Production.
+       */
+      if (/^\d{4}$/.test(generatedTestOtp)) {
+        setTestOtp(generatedTestOtp);
+        setAdminOtp(generatedTestOtp);
+      }
+
+      showToast(
+        "success",
+        generatedTestOtp
+          ? "Admin TEST OTP generated and filled into the OTP field."
+          : "Admin OTP request accepted. Check the configured OTP delivery channel.",
+      );
+    } catch (error) {
+      showToast(
+        "error",
+        error instanceof Error
+          ? error.message
+          : "Unable to send admin OTP",
+      );
+    } finally {
+      setAdminAuthLoading(false);
+    }
   };
 
   const verifyAdminOtp = async () => {
@@ -2463,23 +3398,39 @@ function App() {
     if (!/^\d{10}$/.test(mobile) || adminOtp.length !== 4) { showToast("error", "Enter admin mobile and 4-digit OTP."); return; }
     setAdminAuthLoading(true);
     try {
-      const response = await fetch(`${effectiveApiBase}/auth/verify-otp`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mobile, otp: adminOtp, userType: "ADMIN" }) });
+      const response = await fetch(`${effectiveApiBase}/auth/verify-otp`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mobile, otp: adminOtp, userType: "ADMIN", purposeCode: ADMIN_LOGIN_PURPOSE }) });
       const data = await response.json().catch(() => ({}));
       if (!response.ok || data.success === false) throw new Error(data.message || "Invalid admin OTP");
       const token = String(data.data?.token || "").trim();
       const userId = String(data.data?.userId || "").trim();
       if (!token || !userId) throw new Error("Admin session was not returned by backend");
-      saveStoredAdminToken(token); saveStoredAdminId(userId); setAdminUserId(userId); setConnected(true); setAdminOtp("");
+      saveStoredAdminToken(token);
+      saveStoredAdminId(userId);
+      setAdminUserId(userId);
+      setConnected(true);
+      setAdminOtp("");
+      setTestOtp("");
       showToast("success", "Admin session established.");
     } catch (error) { showToast("error", error instanceof Error ? error.message : "Admin login failed"); }
     finally { setAdminAuthLoading(false); }
   };
 
   const handleDisconnect = () => {
+    realtimeAbortRef.current?.abort();
+    realtimeAbortRef.current = null;
+    try {
+      sessionStorage.removeItem("ridex-admin-last-event-id");
+    } catch {
+      // Ignore storage failures.
+    }
+    setRealtimeStatus("offline");
+    setRealtimeLastEvent(null);
     saveStoredAdminId("");
     saveStoredAdminToken("");
     setAdminUserId("");
     setConnected(false);
+    setAdminOtp("");
+    setTestOtp("");
     setDashboard(null);
     setSelectedDriver(null);
     setSelectedBooking(null);
@@ -6245,12 +7196,579 @@ function App() {
       );
     };
 
+  const renderKyc = () => {
+    const documents = drivers.flatMap((driver) =>
+      safeArray<NonNullable<Driver["documents"]>[number]>(
+        driver.documents,
+      )
+        .filter((document) =>
+          kycDocumentFilter
+            ? String(document.status ?? "").toUpperCase() ===
+              kycDocumentFilter
+            : true,
+        )
+        .map((document) => ({
+          ...document,
+          driverId: driver.id,
+          driverName: driver.fullName ?? driver.id,
+        })),
+    );
+
+    return (
+      <div className="page">
+        <SectionHeader
+          title="KYC / Documents"
+          subtitle="Dedicated document review surface backed by Driver KYC data"
+          onRefresh={() => void loadDrivers()}
+          right={
+            <select
+              className="select-input"
+              value={kycDocumentFilter}
+              onChange={(event) =>
+                setKycDocumentFilter(event.target.value)
+              }
+            >
+              <option value="">All document statuses</option>
+              <option value="PENDING">Pending</option>
+              <option value="UNDER_REVIEW">Under Review</option>
+              <option value="APPROVED">Approved</option>
+              <option value="REJECTED">Rejected</option>
+            </select>
+          }
+        />
+
+        <div className="metrics-grid">
+          <MetricCard
+            label="Documents"
+            value={formatNumber(documents.length)}
+            icon="file"
+            tone="neutral"
+          />
+          <MetricCard
+            label="Pending"
+            value={formatNumber(
+              documents.filter(
+                (document) =>
+                  String(document.status ?? "").toUpperCase() ===
+                  "PENDING",
+              ).length,
+            )}
+            icon="clock"
+            tone="warning"
+          />
+          <MetricCard
+            label="Under Review"
+            value={formatNumber(
+              documents.filter(
+                (document) =>
+                  String(document.status ?? "").toUpperCase() ===
+                  "UNDER_REVIEW",
+              ).length,
+            )}
+            icon="activity"
+            tone="info"
+          />
+          <MetricCard
+            label="Approved"
+            value={formatNumber(
+              documents.filter(
+                (document) =>
+                  String(document.status ?? "").toUpperCase() ===
+                  "APPROVED",
+              ).length,
+            )}
+            icon="check"
+            tone="success"
+          />
+        </div>
+
+        <Panel
+          title="Document Review Queue"
+          subtitle={
+            driversLoading
+              ? "Refreshing driver/KYC data…"
+              : `${documents.length} document(s)`
+          }
+        >
+          {driversLoading ? (
+            <LoadingState message="Loading KYC documents…" />
+          ) : driversError ? (
+            <ErrorState message={driversError} onRetry={loadDrivers} />
+          ) : documents.length === 0 ? (
+            <EmptyState
+              title="No matching KYC documents"
+              message="No driver documents match the current filter."
+            />
+          ) : (
+            <div className="table-wrapper">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Driver</th>
+                    <th>Document</th>
+                    <th>Number</th>
+                    <th>Status</th>
+                    <th>Updated</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {documents.map((document) => (
+                    <tr key={document.id}>
+                      <td>
+                        <button
+                          className="table-link"
+                          type="button"
+                          onClick={() =>
+                            void loadDriverDetails(String(document.driverId))
+                          }
+                        >
+                          {document.driverName}
+                        </button>
+                      </td>
+                      <td>{humanize(document.documentType ?? "DOCUMENT")}</td>
+                      <td>{document.documentNumber ?? "—"}</td>
+                      <td><StatusBadge value={document.status} /></td>
+                      <td>{formatDate(document.updatedAt ?? document.createdAt)}</td>
+                      <td>
+                        <div className="row-actions">
+                          {document.fileUrl ? (
+                            <button
+                              className="button secondary small"
+                              type="button"
+                              onClick={() =>
+                                void (async () => {
+                                  try {
+                                    const response =
+                                      await apiRequest<{ url: string }>(
+                                        `/admin/drivers/${encodeURIComponent(
+                                          String(document.driverId),
+                                        )}/documents/${encodeURIComponent(
+                                          document.id,
+                                        )}/url`,
+                                      );
+                                    if (response.data?.url) {
+                                      window.open(
+                                        response.data.url,
+                                        "_blank",
+                                        "noopener,noreferrer",
+                                      );
+                                    }
+                                  } catch (error) {
+                                    showToast(
+                                      "error",
+                                      error instanceof Error
+                                        ? error.message
+                                        : String(error),
+                                    );
+                                  }
+                                })()
+                              }
+                            >
+                              View
+                            </button>
+                          ) : null}
+                          <button
+                            className="button secondary small"
+                            type="button"
+                            onClick={() =>
+                              void apiRequest(
+                                `/admin/drivers/${encodeURIComponent(
+                                  String(document.driverId),
+                                )}/documents/${encodeURIComponent(
+                                  document.id,
+                                )}/review`,
+                                {
+                                  method: "PATCH",
+                                  body: JSON.stringify({
+                                    status: "UNDER_REVIEW",
+                                  }),
+                                },
+                              )
+                                .then(() => loadDrivers())
+                                .then(() =>
+                                  showToast(
+                                    "success",
+                                    "Document marked under review.",
+                                  ),
+                                )
+                                .catch((error) =>
+                                  showToast(
+                                    "error",
+                                    error instanceof Error
+                                      ? error.message
+                                      : String(error),
+                                  ),
+                                )
+                            }
+                          >
+                            Review
+                          </button>
+                          <button
+                            className="button primary small"
+                            type="button"
+                            onClick={() =>
+                              void apiRequest(
+                                `/admin/drivers/${encodeURIComponent(
+                                  String(document.driverId),
+                                )}/documents/${encodeURIComponent(
+                                  document.id,
+                                )}/review`,
+                                {
+                                  method: "PATCH",
+                                  body: JSON.stringify({
+                                    status: "APPROVED",
+                                  }),
+                                },
+                              )
+                                .then(() => loadDrivers())
+                                .then(() =>
+                                  showToast(
+                                    "success",
+                                    "Document approved.",
+                                  ),
+                                )
+                                .catch((error) =>
+                                  showToast(
+                                    "error",
+                                    error instanceof Error
+                                      ? error.message
+                                      : String(error),
+                                  ),
+                                )
+                            }
+                          >
+                            Approve
+                          </button>
+                          <button
+                            className="button danger-button small"
+                            type="button"
+                            onClick={() => {
+                              const reason = window.prompt(
+                                "Rejection reason",
+                              );
+                              if (!reason?.trim()) return;
+
+                              void apiRequest(
+                                `/admin/drivers/${encodeURIComponent(
+                                  String(document.driverId),
+                                )}/documents/${encodeURIComponent(
+                                  document.id,
+                                )}/review`,
+                                {
+                                  method: "PATCH",
+                                  body: JSON.stringify({
+                                    status: "REJECTED",
+                                    rejectionReason: reason.trim(),
+                                  }),
+                                },
+                              )
+                                .then(() => loadDrivers())
+                                .then(() =>
+                                  showToast(
+                                    "success",
+                                    "Document rejected.",
+                                  ),
+                                )
+                                .catch((error) =>
+                                  showToast(
+                                    "error",
+                                    error instanceof Error
+                                      ? error.message
+                                      : String(error),
+                                  ),
+                                );
+                            }}
+                          >
+                            Reject
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Panel>
+      </div>
+    );
+  };
+
+  const renderSharedRoutes = () => (
+    <div className="page">
+      <SectionHeader
+        title="Shared Ride Routes"
+        subtitle="Admin route catalog and controlled route configuration"
+        onRefresh={() => void loadSharedRoutes()}
+      />
+
+      <div className="metrics-grid">
+        <MetricCard
+          label="Routes"
+          value={formatNumber(sharedRoutes.length)}
+          icon="route"
+          tone="neutral"
+        />
+        <MetricCard
+          label="Active"
+          value={formatNumber(
+            sharedRoutes.filter((route) => route.active).length,
+          )}
+          icon="check"
+          tone="success"
+        />
+        <MetricCard
+          label="Route Points"
+          value={formatNumber(
+            sharedRoutes.reduce(
+              (sum, route) => sum + safeArray(route.points).length,
+              0,
+            ),
+          )}
+          icon="map"
+          tone="info"
+        />
+      </div>
+
+      {sharedRoutesLoading ? (
+        <LoadingState message="Loading Shared Ride routes…" />
+      ) : sharedRoutesError ? (
+        <ErrorState
+          message={sharedRoutesError}
+          onRetry={loadSharedRoutes}
+        />
+      ) : sharedRoutes.length === 0 ? (
+        <EmptyState
+          title="No Shared Ride routes"
+          message="The backend returned no Shared Ride route records."
+        />
+      ) : (
+        <Panel
+          title="Route Catalog"
+          subtitle="Backend-authoritative Shared Ride route records"
+        >
+          <div className="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Route</th>
+                  <th>City</th>
+                  <th>Selection</th>
+                  <th>Points</th>
+                  <th>City Zone</th>
+                  <th>Status</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sharedRoutes.map((route) => (
+                  <tr key={route.id}>
+                    <td>
+                      <strong>{route.name ?? route.id}</strong>
+                      <span className="cell-sub">
+                        {shortId(route.id, 18)}
+                      </span>
+                    </td>
+                    <td>{route.city ?? "—"}</td>
+                    <td>{humanize(route.selectionMode ?? "AUTO_NEAREST")}</td>
+                    <td>{formatNumber(safeArray(route.points).length)}</td>
+                    <td>
+                      {route.cityZone?.name ??
+                        route.cityZone?.id ??
+                        route.cityZoneId ??
+                        "—"}
+                    </td>
+                    <td>
+                      <StatusBadge
+                        value={route.active ? "ACTIVE" : "INACTIVE"}
+                      />
+                    </td>
+                    <td>
+                      <button
+                        className="button secondary small"
+                        type="button"
+                        onClick={() => openSharedRoute(route)}
+                      >
+                        Configure
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Panel>
+      )}
+
+      {selectedSharedRoute ? (
+        <Panel
+          title={`Configure: ${selectedSharedRoute.name ?? selectedSharedRoute.id}`}
+          subtitle="PATCH uses the current backend Shared Ride route contract and remains permission/audit controlled."
+          className="route-editor-panel"
+        >
+          <div className="detail-grid">
+            <label>
+              <span className="field-label">Route name</span>
+              <input
+                className="text-input"
+                value={sharedRouteDraft.name}
+                onChange={(event) =>
+                  setSharedRouteDraft((current) => ({
+                    ...current,
+                    name: event.target.value,
+                  }))
+                }
+              />
+            </label>
+            <label>
+              <span className="field-label">City</span>
+              <input
+                className="text-input"
+                value={sharedRouteDraft.city}
+                onChange={(event) =>
+                  setSharedRouteDraft((current) => ({
+                    ...current,
+                    city: event.target.value,
+                  }))
+                }
+              />
+            </label>
+            <label>
+              <span className="field-label">City zone ID</span>
+              <input
+                className="text-input"
+                value={sharedRouteDraft.cityZoneId}
+                onChange={(event) =>
+                  setSharedRouteDraft((current) => ({
+                    ...current,
+                    cityZoneId: event.target.value,
+                  }))
+                }
+              />
+            </label>
+            <label>
+              <span className="field-label">Selection mode</span>
+              <select
+                className="select-input"
+                value={sharedRouteDraft.selectionMode}
+                onChange={(event) =>
+                  setSharedRouteDraft((current) => ({
+                    ...current,
+                    selectionMode: event.target.value,
+                  }))
+                }
+              >
+                <option value="AUTO_NEAREST">Auto nearest</option>
+                <option value="EXACT_POINT">Exact point</option>
+              </select>
+            </label>
+            <label>
+              <span className="field-label">Status</span>
+              <select
+                className="select-input"
+                value={sharedRouteDraft.active ? "ACTIVE" : "INACTIVE"}
+                onChange={(event) =>
+                  setSharedRouteDraft((current) => ({
+                    ...current,
+                    active: event.target.value === "ACTIVE",
+                  }))
+                }
+              >
+                <option value="ACTIVE">Active</option>
+                <option value="INACTIVE">Inactive</option>
+              </select>
+            </label>
+          </div>
+
+          <div className="button-row" style={{ marginTop: 14 }}>
+            <button
+              className="button primary"
+              type="button"
+              onClick={() => void saveSharedRoute()}
+              disabled={sharedRouteSaving}
+            >
+              {sharedRouteSaving ? "Saving…" : "Save Route Configuration"}
+            </button>
+            <button
+              className="button secondary"
+              type="button"
+              onClick={() => setSelectedSharedRoute(null)}
+              disabled={sharedRouteSaving}
+            >
+              Close
+            </button>
+          </div>
+
+          <div className="route-points-list">
+            <div className="panel-header">
+              <div>
+                <h3>Route Points</h3>
+                <p>
+                  Read-only catalog here; point creation/update remains
+                  backend-contract controlled.
+                </p>
+              </div>
+            </div>
+            {safeArray<SharedRoutePoint>(selectedSharedRoute.points).length ===
+            0 ? (
+              <EmptyState
+                title="No route points"
+                message="No Shared Ride points are attached to this route."
+              />
+            ) : (
+              <div className="table-wrapper">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Seq</th>
+                      <th>Point</th>
+                      <th>Address</th>
+                      <th>Latitude</th>
+                      <th>Longitude</th>
+                      <th>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {safeArray<SharedRoutePoint>(
+                      selectedSharedRoute.points,
+                    )
+                      .slice()
+                      .sort(
+                        (a, b) =>
+                          Number(a.sequence ?? 0) -
+                          Number(b.sequence ?? 0),
+                      )
+                      .map((point) => (
+                        <tr key={point.id}>
+                          <td>{point.sequence ?? "—"}</td>
+                          <td>{point.name ?? "—"}</td>
+                          <td>{point.address ?? "—"}</td>
+                          <td>{displayValue(point.latitude)}</td>
+                          <td>{displayValue(point.longitude)}</td>
+                          <td>
+                            <StatusBadge
+                              value={point.active ? "ACTIVE" : "INACTIVE"}
+                            />
+                          </td>
+                        </tr>
+                      ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </Panel>
+      ) : null}
+    </div>
+  );
+
   const renderSetup = () => {
     return (
       <div className="page">
         <SectionHeader
           title="Test Data Lab"
-          subtitle="Complete RideX v3.5 test-mode dataset — seed, inspect, edit and delete"
+          subtitle="RideX TEST dataset — seed, inspect and operate against the backend TEST environment"
           onRefresh={() => void loadTestData()}
         />
 
@@ -6261,8 +7779,8 @@ function App() {
             <div className="content-grid two">
               <div className="panel setup-panel">
                 <p className="eyebrow">CONTROLLED FIXTURE</p>
-                <h2>RideX v3.5 full test dataset</h2>
-                <p>Creates customers, drivers, vehicles, bookings, trips, payments, refunds, earnings, settlements, ratings, support, SOS, notifications, coupons, quick locations, configuration and RBAC fixtures with deterministic v3.5 test IDs.</p>
+                <h2>RideX TEST dataset</h2>
+                <p>Creates the deterministic RideX TEST fixture set for customers, drivers, vehicles, bookings, trips, payments, earnings, support, SOS, notifications, coupons, configuration and RBAC. The current direct seed summary uses the v5.6 blueprint fixture set.</p>
                 <div className="button-row">
                   <button className="button primary large" type="button" onClick={() => void seedAllTestData()} disabled={testDataLoading}>{testDataLoading ? "Working…" : "Seed / Reset All Test Data"}</button>
                   <button className="button danger-button large" type="button" onClick={() => void deleteAllTestData()} disabled={testDataLoading}>Delete All Test Data</button>
@@ -6279,15 +7797,15 @@ function App() {
 
             <div className="panel">
               <div className="panel-header"><div><p className="eyebrow">ADMIN CRUD</p><h3>Editable test records</h3></div></div>
-              <p>Use the existing Customer, Driver, Vehicle, Rides, Promotions and Support screens for normal operations. This lab also confirms that only IDs beginning with <code>v35-test-</code> can be edited or deleted through the test-data API.</p>
+              <p>Normal operational edits should use the dedicated Customer, Driver, Vehicle, Rides, Promotions and Support screens. The current Admin test-data CRUD endpoint still enforces its legacy v3.5 confirmation/ID gate; current v5.6 blueprint fixture IDs are therefore treated as read-only here until that backend gate is migrated.</p>
               <div className="table-wrapper">
                 <table><thead><tr><th>Entity</th><th>Records</th><th>Examples</th><th>Controls</th></tr></thead><tbody>
-                  {testDataRecords ? Object.entries(testDataRecords).map(([key, rows]) => { const records = rows as any[]; const target = records[0]; return <tr key={key}><td>{humanize(key)}</td><td>{records.length}</td><td>{records.slice(0, 3).map((r) => shortId(r.id ?? "", 18)).join(", ") || "—"}</td><td><button className="button secondary small" type="button" onClick={() => { if (!target?.id) return; const field = key === "customers" ? "fullName" : key === "drivers" ? "fullName" : key === "vehicles" ? "vehicleNumber" : key === "bookings" ? "status" : key === "locations" ? "name" : key === "coupons" ? "description" : key === "supportCases" ? "status" : "title"; const value = window.prompt(`New ${field}`, String(target[field] ?? "")); if (value === null) return; const entity = key === "locations" ? "quick-locations" : key === "supportCases" ? "support" : key; void apiRequest(`/admin/test-data/${entity}/${target.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ [field]: value }) }).then(() => { showToast("success", `${humanize(key)} record updated`); return loadTestData(); }).catch((error) => showToast("error", error instanceof Error ? error.message : "Update failed")); }}>Edit first</button>{target?.id ? <button className="button danger-button small" type="button" onClick={() => { if (!window.confirm(`Delete test ${key} record ${target.id}?`)) return; const entity = key === "locations" ? "quick-locations" : key === "supportCases" ? "support" : key; void apiRequest(`/admin/test-data/${entity}/${target.id}`, { method: "DELETE", headers: { "Content-Type": "application/json" } }).then(() => { showToast("success", `${humanize(key)} record deleted`); return loadTestData(); }).catch((error) => showToast("error", error instanceof Error ? error.message : "Delete failed")); }}>Delete first</button> : null}</td></tr>; }) : <tr><td colSpan={4}>Load the test dataset to inspect records.</td></tr>}
+                  {testDataRecords ? Object.entries(testDataRecords).map(([key, rows]) => { const records = rows as any[]; const target = records[0]; return <tr key={key}><td>{humanize(key)}</td><td>{records.length}</td><td>{records.slice(0, 3).map((r) => shortId(r.id ?? "", 18)).join(", ") || "—"}</td><td><span className="badge">Read-only until TEST CRUD gate is migrated</span></td></tr>; }) : <tr><td colSpan={4}>Load the test dataset to inspect records.</td></tr>}
                 </tbody></table>
               </div>
             </div>
 
-            <div className="panel warning-panel"><strong>Test-only safety boundary</strong><p>All fixture IDs use the <code>v35-test-</code> prefix and seed/reset endpoints are hard-disabled when RIDEX_TEST_MODE is not true.</p></div>
+            <div className="panel warning-panel"><strong>TEST-only safety boundary</strong><p>Seed/reset remains disabled outside TEST. The current backend seed path reports the v5.6 blueprint fixture set, while the Admin CRUD endpoint retains a legacy v3.5 ID confirmation boundary.</p></div>
           </>
         )}
       </div>
@@ -6301,54 +7819,179 @@ function App() {
     const cancelledBookings = bookings.filter((booking) => String(booking.status ?? "").toUpperCase() === "CANCELLED");
     const onlineDrivers = drivers.filter((driver) => ["ONLINE", "ON_TRIP"].includes(String(driver.driverStatus ?? "").toUpperCase()));
     const activeRides = activeBookings.slice(0, 8);
+    const etaValues = activeBookings
+      .map((booking) => {
+        const directEta =
+          Number(
+            (booking as unknown as { etaMinutes?: unknown }).etaMinutes,
+          );
+        if (Number.isFinite(directEta) && directEta >= 0) {
+          return directEta;
+        }
+
+        const legEta = safeArray<BookingLeg>(booking.legs)
+          .map((leg) => Number(leg.durationMinutes))
+          .find((value) => Number.isFinite(value) && value >= 0);
+
+        return legEta;
+      })
+      .filter(
+        (value): value is number =>
+          value !== undefined &&
+          Number.isFinite(value) && value >= 0,
+      );
+    const averageEta =
+      etaValues.length > 0
+        ? `${(
+            etaValues.reduce((sum, value) => sum + value, 0) /
+            etaValues.length
+          ).toFixed(0)} min`
+        : "—";
 
     return (
       <div className="page">
         <SectionHeader
           title="Live Rides / Live Operations"
-          subtitle="Track current rides, driver availability and operational exceptions in real time"
-          actions={<span className="api-pill"><span className="online-dot" /> API Live Data</span>}
+          subtitle="Backend-authoritative driver, ride, request, GPS and safety operations"
+          actions={
+            <>
+              <span
+                className={`realtime-pill ${realtimeStatus}`}
+                title={
+                  realtimeLastEvent
+                    ? `${realtimeLastEvent.type} · ${formatDate(
+                        realtimeLastEvent.receivedAt,
+                      )}`
+                    : "No realtime event received yet"
+                }
+              >
+                <span className="online-dot" />
+                {realtimeStatus === "connected"
+                  ? "Realtime Connected"
+                  : realtimeStatus === "connecting"
+                    ? "Realtime Connecting"
+                    : realtimeStatus === "reconnecting"
+                      ? "Realtime Reconnecting"
+                      : "Realtime Offline"}
+              </span>
+              <span className="api-pill">
+                <span className="online-dot" />
+                {browserOnline ? "API Online" : "Browser Offline"}
+              </span>
+            </>
+          }
         />
 
+        {!browserOnline ? (
+          <div className="notice warning-notice">
+            <strong>Offline mode</strong>
+            <span>
+              The browser reports no network connectivity. Read-only state
+              remains visible; write actions are blocked by the API layer.
+            </span>
+          </div>
+        ) : null}
+
         <div className="metrics-grid">
-          <MetricCard label="Active Rides" value={formatNumber(activeBookings.length)} icon="driver" tone="success" />
-          <MetricCard label="Online Drivers" value={formatNumber(onlineDrivers.length)} icon="driver" tone="info" />
-          <MetricCard label="Total Drivers" value={formatNumber(drivers.length)} icon="users" tone="neutral" />
-          <MetricCard label="Waiting for Driver" value={formatNumber(waitingBookings.length)} icon="clock" tone="warning" />
-          <MetricCard label="Average ETA" value="Live GPS" icon="clock" tone="info" />
-          <MetricCard label="Cancelled" value={formatNumber(cancelledBookings.length)} icon="close" tone="danger" />
+          <MetricCard
+            label="Active Rides"
+            value={formatNumber(activeBookings.length)}
+            icon="driver"
+            tone="success"
+          />
+          <MetricCard
+            label="Online Drivers"
+            value={formatNumber(onlineDrivers.length)}
+            icon="driver"
+            tone="info"
+          />
+          <MetricCard
+            label="Total Drivers"
+            value={formatNumber(drivers.length)}
+            icon="users"
+            tone="neutral"
+          />
+          <MetricCard
+            label="Waiting for Driver"
+            value={formatNumber(waitingBookings.length)}
+            icon="clock"
+            tone="warning"
+          />
+          <MetricCard
+            label="Backend ETA"
+            value={averageEta}
+            icon="clock"
+            tone="info"
+          />
+          <MetricCard
+            label="Cancelled"
+            value={formatNumber(cancelledBookings.length)}
+            icon="close"
+            tone="danger"
+          />
         </div>
 
+        {realtimeLastEvent ? (
+          <div className="info-box live-event-box">
+            <strong>Last realtime event</strong>
+            <span>
+              {humanize(realtimeLastEvent.type)} ·{" "}
+              {formatDate(realtimeLastEvent.receivedAt)}
+            </span>
+          </div>
+        ) : null}
+
         <div className="content-grid two">
-          <Panel title="Active Rides" subtitle={`${activeBookings.length} active booking(s) from backend`}>
+          <Panel
+            title="Active Rides"
+            subtitle={`${activeBookings.length} active booking(s) from backend`}
+          >
             <div className="stack-list">
               {activeRides.length === 0 ? (
                 <div className="muted">No active rides right now.</div>
-              ) : activeRides.map((booking) => (
-                <div className="list-row" key={booking.id}>
-                  <div>
-                    <strong>{booking.assignedDriver?.fullName ?? "Unassigned"}</strong>
-                    <span>{shortId(booking.id, 18)} • {booking.pickupAddress ?? "Pickup"} → {booking.dropAddress ?? "Drop"}</span>
-                  </div>
-                  <div className="row-right">
-                    <StatusBadge value={humanize(booking.status ?? "UNKNOWN")} />
-                    <span>{booking.vehicle?.vehicleNumber ?? "No vehicle"}</span>
-                  </div>
-                </div>
-              ))}
+              ) : (
+                activeRides.map((booking) => (
+                  <button
+                    className="list-row live-ride-row"
+                    key={booking.id}
+                    type="button"
+                    onClick={() => void loadBookingDetails(booking.id)}
+                  >
+                    <div>
+                      <strong>
+                        {booking.assignedDriver?.fullName ?? "Unassigned"}
+                      </strong>
+                      <span>
+                        {shortId(booking.id, 18)} •{" "}
+                        {booking.pickupAddress ?? "Pickup"} →{" "}
+                        {booking.dropAddress ?? "Drop"}
+                      </span>
+                    </div>
+                    <div className="row-right">
+                      <StatusBadge
+                        value={humanize(booking.status ?? "UNKNOWN")}
+                      />
+                      <span>
+                        {booking.vehicle?.vehicleNumber ?? "No vehicle"}
+                      </span>
+                    </div>
+                  </button>
+                ))
+              )}
             </div>
           </Panel>
 
-          <Panel title="Operations Map" subtitle="Driver GPS positions from backend">
-            <div className="map-placeholder">
-              <div className="map-grid" />
-              <div className="map-badge">{formatNumber(onlineDrivers.length)} Online Drivers</div>
-              {onlineDrivers.slice(0, 6).map((driver, index) => (
-                <div className={`map-marker m${index + 1}`} key={driver.id} title={`${driver.fullName ?? "Driver"} · ${driver.location?.latitude ?? "—"}, ${driver.location?.longitude ?? "—"}`}>
-                  <AppIcon name={driver.driverStatus === "ON_TRIP" ? "driver" : "vehicle"} size={19} />
-                </div>
-              ))}
-            </div>
+          <Panel
+            title="Operations Map"
+            subtitle="Coordinate-based operational map using backend GPS data"
+          >
+            <LiveOperationsMap
+              drivers={drivers}
+              bookings={bookings}
+              onDriverClick={(driverId) =>
+                void loadDriverDetails(driverId)
+              }
+            />
           </Panel>
         </div>
       </div>
@@ -6450,9 +8093,138 @@ function App() {
 
   const renderSupport = () => (
     <div className="page">
-      <SectionHeader title="Support & Disputes" subtitle="Live support cases from customers and drivers" onRefresh={() => void loadOperationsData()} />
-      <Panel title="Open Cases">
-        <div className="table-wrapper"><table><thead><tr><th>Case</th><th>Requester</th><th>Priority</th><th>Status</th><th>Updated</th><th>Action</th></tr></thead><tbody>{supportRows.map((row) => <tr key={row.id}><td>{row.id}</td><td>{row.customer?.fullName || row.driver?.fullName || "Unknown"}</td><td><StatusBadge value={row.priority}/></td><td><StatusBadge value={row.status}/></td><td>{formatDate(row.updatedAt)}</td><td><button className="button secondary small" type="button" onClick={() => void apiRequest(`/admin/support/cases/${row.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({status: row.status === "RESOLVED" ? "OPEN" : "RESOLVED"})}).then(()=>loadOperationsData())}>{row.status === "RESOLVED" ? "Reopen" : "Resolve"}</button></td></tr>)}{supportRows.length===0?<tr><td colSpan={6}>No support cases found.</td></tr>:null}</tbody></table></div>
+      <SectionHeader
+        title="Support & Disputes"
+        subtitle="RBAC-protected support inbox with case conversation and Admin replies"
+        onRefresh={() => void loadOperationsData()}
+      />
+      <div className="metrics-grid">
+        <MetricCard
+          label="Open / Active"
+          value={formatNumber(
+            supportRows.filter((row) =>
+              ["OPEN", "IN_PROGRESS"].includes(
+                String(row.status ?? "").toUpperCase(),
+              ),
+            ).length,
+          )}
+          icon="support"
+          tone="warning"
+        />
+        <MetricCard
+          label="Resolved"
+          value={formatNumber(
+            supportRows.filter(
+              (row) =>
+                String(row.status ?? "").toUpperCase() === "RESOLVED",
+            ).length,
+          )}
+          icon="check"
+          tone="success"
+        />
+        <MetricCard
+          label="Total Cases"
+          value={formatNumber(supportRows.length)}
+          icon="database"
+          tone="neutral"
+        />
+      </div>
+
+      <Panel title="Support Inbox">
+        {operationLoading ? (
+          <LoadingState message="Loading support cases…" />
+        ) : supportRows.length === 0 ? (
+          <EmptyState
+            title="No support cases"
+            message="No support cases were returned by the Admin support API."
+          />
+        ) : (
+          <div className="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Case</th>
+                  <th>Requester</th>
+                  <th>Priority</th>
+                  <th>Status</th>
+                  <th>Last Update</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {supportRows.map((row) => (
+                  <tr key={row.id}>
+                    <td>
+                      <strong>{shortId(row.id, 20)}</strong>
+                      <span className="cell-sub">
+                        {row.subject || "RideX support case"}
+                      </span>
+                    </td>
+                    <td>
+                      {row.customer?.fullName ||
+                        row.driver?.fullName ||
+                        "Unknown"}
+                    </td>
+                    <td>
+                      <StatusBadge value={row.priority} />
+                    </td>
+                    <td>
+                      <StatusBadge value={row.status} />
+                    </td>
+                    <td>{formatDate(row.updatedAt)}</td>
+                    <td>
+                      <div className="row-actions">
+                        <button
+                          className="button secondary small"
+                          type="button"
+                          onClick={() => void openSupportCase(String(row.id))}
+                        >
+                          View / Reply
+                        </button>
+                        <button
+                          className={
+                            row.status === "RESOLVED"
+                              ? "button secondary small"
+                              : "button primary small"
+                          }
+                          type="button"
+                          onClick={() =>
+                            void apiRequest(
+                              `/support/admin/cases/${encodeURIComponent(
+                                String(row.id),
+                              )}`,
+                              {
+                                method: "PATCH",
+                                body: JSON.stringify({
+                                  status:
+                                    String(row.status).toUpperCase() ===
+                                    "RESOLVED"
+                                      ? "OPEN"
+                                      : "RESOLVED",
+                                }),
+                              },
+                            )
+                              .then(() => loadOperationsData())
+                              .catch((error) =>
+                                showToast(
+                                  "error",
+                                  error instanceof Error
+                                    ? error.message
+                                    : String(error),
+                                ),
+                              )
+                          }
+                        >
+                          {row.status === "RESOLVED" ? "Reopen" : "Resolve"}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </Panel>
     </div>
   );
@@ -6540,6 +8312,12 @@ function App() {
         case "drivers":
           return renderDrivers();
 
+        case "kyc":
+          return renderKyc();
+
+        case "routes":
+          return renderSharedRoutes();
+
         case "bookings":
           return renderBookings();
 
@@ -6604,6 +8382,28 @@ function App() {
               <p>
                 Verify the approved Admin mobile with OTP to establish a backend-issued secure session.
               </p>
+
+              {RIDEX_TEST_MODE || testOtp ? (
+                <div
+                  style={{
+                    marginTop: 10,
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 7,
+                    padding: "6px 10px",
+                    borderRadius: 999,
+                    background: "#fff7ed",
+                    color: "#9a3412",
+                    border: "1px solid #fed7aa",
+                    fontSize: 11,
+                    fontWeight: 800,
+                    letterSpacing: "0.04em",
+                    textTransform: "uppercase",
+                  }}
+                >
+                  TEST MODE ONLY · Backend-generated OTP
+                </div>
+              ) : null}
             </div>
 
             <form
@@ -6631,8 +8431,97 @@ function App() {
                 />
               </label>
 
-              <label><span className="field-label">Admin Mobile</span><input className="text-input" value={adminMobile} onChange={(event) => setAdminMobile(event.target.value.replace(/\D/g, "").slice(0, 10))} inputMode="numeric" placeholder="10-digit admin mobile" autoFocus /></label>
+              <label><span className="field-label">Admin Mobile</span><input className="text-input" value={adminMobile} onChange={(event) => { setAdminMobile(event.target.value.replace(/\D/g, "").slice(0, 10)); setTestOtp(""); }} inputMode="numeric" placeholder="10-digit admin mobile" autoFocus /></label>
               <label><span className="field-label">OTP</span><input className="text-input" value={adminOtp} onChange={(event) => setAdminOtp(event.target.value.replace(/\D/g, "").slice(0, 4))} inputMode="numeric" placeholder="4-digit OTP" /></label>
+
+              {testOtp ? (
+                <div
+                  style={{
+                    marginTop: 2,
+                    padding: 16,
+                    border: "2px solid #d97706",
+                    borderRadius: 12,
+                    background: "#fff7ed",
+                  }}
+                >
+                  <div
+                    style={{
+                      fontSize: 12,
+                      fontWeight: 800,
+                      letterSpacing: "0.08em",
+                      textTransform: "uppercase",
+                      color: "#9a3412",
+                      marginBottom: 6,
+                    }}
+                  >
+                    TEST MODE ONLY
+                  </div>
+
+                  <div
+                    style={{
+                      fontSize: 12,
+                      lineHeight: 1.5,
+                      color: "#7c2d12",
+                      marginBottom: 10,
+                    }}
+                  >
+                    This OTP is visible only in the RideX TEST environment.
+                    It is never displayed in Production.
+                  </div>
+
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 12,
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: 28,
+                        lineHeight: 1,
+                        fontWeight: 900,
+                        letterSpacing: "0.22em",
+                        fontFamily: "monospace",
+                        color: "#111827",
+                        padding: "8px 12px",
+                        background: "#ffffff",
+                        border: "1px solid #fed7aa",
+                        borderRadius: 10,
+                      }}
+                      aria-label={`TEST OTP ${testOtp}`}
+                    >
+                      {testOtp}
+                    </div>
+
+                    <button
+                      className="button secondary"
+                      type="button"
+                      onClick={() => {
+                        if (navigator.clipboard) {
+                          void navigator.clipboard.writeText(testOtp);
+                        }
+                        setAdminOtp(testOtp);
+                        showToast("success", "TEST OTP copied to OTP field.");
+                      }}
+                    >
+                      Use OTP
+                    </button>
+                  </div>
+
+                  <div
+                    style={{
+                      marginTop: 9,
+                      fontSize: 11,
+                      color: "#92400e",
+                    }}
+                  >
+                    Purpose: {ADMIN_LOGIN_PURPOSE} · Expires according to backend OTP configuration.
+                  </div>
+                </div>
+              ) : null}
+
               <div style={{display:"flex",gap:10}}>
                 <button className="button secondary large" type="button" onClick={() => void sendAdminOtp()} disabled={adminAuthLoading}>Send OTP</button>
                 <button className="button primary large" type="button" onClick={() => void verifyAdminOtp()} disabled={adminAuthLoading}>Verify & Connect</button>
@@ -6734,7 +8623,11 @@ function App() {
               <span className="online-dot" />
               <div>
                 <strong>
-                  Connected
+                  {realtimeStatus === "connected"
+                    ? "Realtime Connected"
+                    : browserOnline
+                      ? "API Connected"
+                      : "Offline"}
                 </strong>
                 <span>
                   {shortId(
@@ -6828,16 +8721,27 @@ function App() {
             <button
               className="button secondary small"
               type="button"
-              onClick={
-                refreshCurrentScreen
-              }
+              onClick={refreshCurrentScreen}
+              aria-label="Refresh current screen"
+              title="Refresh current screen"
             >
               ↻
             </button>
 
-            <div className="api-pill">
+            <span className={`realtime-pill ${realtimeStatus}`}>
               <span className="online-dot" />
-              API Connected
+              {realtimeStatus === "connected"
+                ? "Realtime"
+                : realtimeStatus === "reconnecting"
+                  ? "Reconnecting"
+                  : realtimeStatus === "connecting"
+                    ? "Connecting"
+                    : "Realtime offline"}
+            </span>
+
+            <div className={`api-pill ${browserOnline ? "" : "offline"}`}>
+              <span className="online-dot" />
+              {browserOnline ? "API Connected" : "Offline"}
             </div>
           </div>
         </header>
@@ -6858,6 +8762,165 @@ function App() {
       {selectedCustomer
         ? renderCustomerDrawer()
         : null}
+
+      {selectedSupportCase ? (
+        <Drawer
+          title={`Support Case ${shortId(
+            selectedSupportCase.id,
+            20,
+          )}`}
+          onClose={() => {
+            if (!supportReplyLoading) {
+              setSelectedSupportCase(null);
+              setSupportReply("");
+              setSupportAttachmentUrl("");
+            }
+          }}
+        >
+          {supportCaseLoading ? (
+            <LoadingState message="Loading support conversation…" />
+          ) : (
+            <>
+              <div className="detail-grid">
+                <div>
+                  <span>Status</span>
+                  <strong>
+                    <StatusBadge value={selectedSupportCase.status} />
+                  </strong>
+                </div>
+                <div>
+                  <span>Priority</span>
+                  <strong>
+                    <StatusBadge value={selectedSupportCase.priority} />
+                  </strong>
+                </div>
+                <div>
+                  <span>Customer</span>
+                  <strong>
+                    {selectedSupportCase.customerId ?? "—"}
+                  </strong>
+                </div>
+                <div>
+                  <span>Driver</span>
+                  <strong>
+                    {selectedSupportCase.driverId ?? "—"}
+                  </strong>
+                </div>
+                <div style={{ gridColumn: "1 / -1" }}>
+                  <span>Subject</span>
+                  <strong>
+                    {selectedSupportCase.subject ?? "RideX Support"}
+                  </strong>
+                </div>
+                <div style={{ gridColumn: "1 / -1" }}>
+                  <span>Description</span>
+                  <strong>
+                    {selectedSupportCase.description ?? "—"}
+                  </strong>
+                </div>
+              </div>
+
+              <div className="drawer-section">
+                <h3>Conversation</h3>
+                {safeArray<any>(selectedSupportCase.messages).length === 0 ? (
+                  <EmptyState
+                    title="No messages"
+                    message="No support messages are attached to this case."
+                  />
+                ) : (
+                  <div className="support-thread">
+                    {safeArray<any>(selectedSupportCase.messages).map(
+                      (message) => (
+                        <div
+                          className={`support-message ${
+                            String(message.senderType ?? "")
+                              .toUpperCase() === "ADMIN"
+                              ? "admin"
+                              : ""
+                          }`}
+                          key={message.id}
+                        >
+                          <div className="support-message-meta">
+                            <strong>
+                              {humanize(message.senderType ?? "UNKNOWN")}
+                            </strong>
+                            <span>{formatDate(message.createdAt)}</span>
+                          </div>
+                          <p>{String(message.message ?? "")}</p>
+                          {message.attachmentUrl ? (
+                            <a
+                              className="table-link"
+                              href={String(message.attachmentUrl)}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              Open attachment reference
+                            </a>
+                          ) : null}
+                        </div>
+                      ),
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="drawer-section">
+                <h3>Admin Reply</h3>
+                <label>
+                  <span className="field-label">Message</span>
+                  <textarea
+                    className="text-input"
+                    rows={5}
+                    value={supportReply}
+                    onChange={(event) =>
+                      setSupportReply(event.target.value)
+                    }
+                    placeholder="Write the Admin response…"
+                  />
+                </label>
+                <label style={{ marginTop: 12 }}>
+                  <span className="field-label">
+                    Attachment URL (optional reference)
+                  </span>
+                  <input
+                    className="text-input"
+                    value={supportAttachmentUrl}
+                    onChange={(event) =>
+                      setSupportAttachmentUrl(event.target.value)
+                    }
+                    placeholder="https://…"
+                  />
+                </label>
+                <div
+                  className="button-row"
+                  style={{ marginTop: 12 }}
+                >
+                  <button
+                    className="button primary"
+                    type="button"
+                    onClick={() => void sendSupportReply()}
+                    disabled={supportReplyLoading}
+                  >
+                    {supportReplyLoading ? "Sending…" : "Send Reply"}
+                  </button>
+                  <button
+                    className="button secondary"
+                    type="button"
+                    onClick={() =>
+                      void openSupportCase(
+                        String(selectedSupportCase.id),
+                      )
+                    }
+                    disabled={supportReplyLoading}
+                  >
+                    Refresh Conversation
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+        </Drawer>
+      ) : null}
 
       {confirmation ? (
         <ConfirmationModal
