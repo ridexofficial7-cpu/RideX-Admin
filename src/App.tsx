@@ -79,7 +79,10 @@ type Screen =
   | "monitoring"
   | "kyc"
   | "routes"
-  | "adminPresence";
+  | "adminPresence"
+  | "locationMaster"
+  | "routeBuilder"
+  | "matchingConfig";
 
 type ApiResponse<T> = {
   success?: boolean;
@@ -375,9 +378,9 @@ const ADMIN_PRESENCE_STALE_MS = 10 * 60 * 1000;
 
 const ROLE_SCREEN_ACCESS: Record<string, Screen[]> = {
   SUPER_ADMIN: [
-    "dashboard","liveOperations","quickRide","drivers","bookings","customers","safety","admins","roles","audit","quickLocations","setup","payments","reports","pricing","settings","support","notifications","vehicles","promotions","platform","matching","events","finance","security","monitoring","kyc","routes","adminPresence",
+    "dashboard","liveOperations","quickRide","drivers","bookings","customers","safety","admins","roles","audit","quickLocations","setup","payments","reports","pricing","settings","support","notifications","vehicles","promotions","platform","matching","events","finance","security","monitoring","kyc","routes","adminPresence","locationMaster","routeBuilder","matchingConfig",
   ],
-  OPERATIONS: ["dashboard","liveOperations","quickRide","matching","events","bookings","customers","drivers","vehicles","quickLocations","routes","reports","notifications","safety"],
+  OPERATIONS: ["dashboard","liveOperations","quickRide","matching","matchingConfig","routeBuilder","locationMaster","events","bookings","customers","drivers","vehicles","quickLocations","routes","reports","notifications","safety"],
   FINANCE: ["dashboard","finance","payments","reports","pricing","promotions","notifications","bookings"],
   SAFETY: ["dashboard","liveOperations","events","bookings","customers","drivers","safety","reports","notifications"],
   SUPPORT: ["dashboard","bookings","customers","drivers","support","notifications","reports"],
@@ -403,7 +406,9 @@ const ROLE_TOOLBOX: Record<string, Array<{ screen: Screen; label: string; descri
     {screen:"quickRide",label:"Quick Ride",description:"Create an operational ride using backend rules.",icon:"plus"},
     {screen:"drivers",label:"Drivers",description:"Driver status and operational details.",icon:"driver"},
     {screen:"vehicles",label:"Vehicles",description:"Vehicle readiness and availability.",icon:"vehicle"},
-    {screen:"quickLocations",label:"Quick Locations",description:"Operational location catalogue.",icon:"map"},
+    {screen:"locationMaster",label:"City Location Master",description:"Capture and manage reusable city locations for pickup/drop and route building.",icon:"map"},
+    {screen:"routeBuilder",label:"Route Builder",description:"Build ordered multi-stop routes and assign eligible drivers.",icon:"route"},
+    {screen:"matchingConfig",label:"Matching Configuration",description:"Configure automatic/hybrid matching, radius, ETA, detour and fallback rules.",icon:"activity"},
     {screen:"reports",label:"Operations Reports",description:"Operational metrics and booking trends.",icon:"chart"},
   ],
   FINANCE: [
@@ -474,6 +479,84 @@ type SharedRoute = {
   points?: SharedRoutePoint[];
   [key: string]: unknown;
 };
+
+type LocationMasterRecord = {
+  id: string;
+  cityId?: string | null;
+  city?: string | null;
+  name?: string | null;
+  category?: string | null;
+  type?: string | null;
+  address?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  photoUrl?: string | null;
+  googlePlaceId?: string | null;
+  pickupAllowed?: boolean;
+  dropAllowed?: boolean;
+  pickupRadiusMeters?: number | null;
+  dropRadiusMeters?: number | null;
+  active?: boolean;
+  isActive?: boolean;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  [key: string]: unknown;
+};
+
+type RouteBuilderRecord = {
+  id: string;
+  name?: string;
+  city?: string | null;
+  cityId?: string | null;
+  status?: string | null;
+  active?: boolean;
+  serviceType?: string | null;
+  vehicleType?: string | null;
+  matchingMode?: string | null;
+  startLocationId?: string | null;
+  endLocationId?: string | null;
+  startLocation?: LocationMasterRecord | null;
+  endLocation?: LocationMasterRecord | null;
+  stopIds?: string[];
+  stops?: LocationMasterRecord[];
+  allowedDriverIds?: string[];
+  allowedDrivers?: Array<{ id: string; fullName?: string | null }>;
+  zoneIds?: string[];
+  workingDays?: string[];
+  workingStart?: string | null;
+  workingEnd?: string | null;
+  pickupRadiusMeters?: number | null;
+  dropRadiusMeters?: number | null;
+  maxDetourKm?: number | null;
+  maxPickupEtaMinutes?: number | null;
+  gpsFreshnessSeconds?: number | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  [key: string]: unknown;
+};
+
+type MatchingConfiguration = {
+  defaultMode: "ADMIN_CONTROLLED" | "AUTOMATIC" | "HYBRID";
+  locationMatchRadiusMeters: number;
+  pickupRadiusMeters: number;
+  dropRadiusMeters: number;
+  maxDetourKm: number;
+  maxPickupEtaMinutes: number;
+  gpsFreshnessSeconds: number;
+  offerTimeoutSeconds: number;
+  retryCount: number;
+  maxPickupDistanceKm: number;
+  fallbackEnabled: boolean;
+  fallbackLevels: string[];
+  onlineOnly: boolean;
+  excludeBusyDrivers: boolean;
+  passengerEnabled: boolean;
+  sharedEnabled: boolean;
+  parcelEnabled: boolean;
+  goodsEnabled: boolean;
+  scheduledEnabled: boolean;
+};
+
 
 
 const RIDEX_ADMIN_THEME = `
@@ -853,6 +936,9 @@ const NAV_ITEMS: Array<{
   { id: "payments", label: "Payments", icon: "payment" },
   { id: "reports", label: "Reports & Analytics", icon: "chart" },
   { id: "pricing", label: "Pricing & Commission", icon: "percent" },
+  { id: "locationMaster", label: "City Location Master", icon: "map" },
+  { id: "routeBuilder", label: "Route Builder", icon: "route" },
+  { id: "matchingConfig", label: "Matching Configuration", icon: "activity" },
   { id: "quickLocations", label: "Quick Locations", icon: "map" },
   { id: "routes", label: "Shared Ride Routes", icon: "route" },
   { id: "promotions", label: "Promotions", icon: "promo" },
@@ -1994,6 +2080,80 @@ function App() {
     setQuickLocationsError,
   ] = useState("");
 
+  const [locationRecords, setLocationRecords] = useState<LocationMasterRecord[]>([]);
+  const [locationLoading, setLocationLoading] = useState(false);
+  const [locationError, setLocationError] = useState("");
+  const [locationSaving, setLocationSaving] = useState(false);
+  const [locationPhoto, setLocationPhoto] = useState<File | null>(null);
+  const [locationPhotoPreview, setLocationPhotoPreview] = useState("");
+  const [locationDraft, setLocationDraft] = useState({
+    city: "",
+    cityId: "",
+    name: "",
+    category: "LANDMARK",
+    type: "LANDMARK",
+    address: "",
+    latitude: "",
+    longitude: "",
+    pickupAllowed: true,
+    dropAllowed: true,
+    pickupRadiusMeters: "300",
+    dropRadiusMeters: "500",
+    active: true,
+  });
+
+  const [routeBuilderRows, setRouteBuilderRows] = useState<RouteBuilderRecord[]>([]);
+  const [routeBuilderLoading, setRouteBuilderLoading] = useState(false);
+  const [routeBuilderSaving, setRouteBuilderSaving] = useState(false);
+  const [routeBuilderError, setRouteBuilderError] = useState("");
+  const [routeDraft, setRouteDraft] = useState({
+    name: "",
+    city: "",
+    cityId: "",
+    serviceType: "PASSENGER",
+    vehicleType: "E_RICKSHAW",
+    matchingMode: "HYBRID",
+    startLocationId: "",
+    endLocationId: "",
+    stopIds: [] as string[],
+    allowedDriverIds: [] as string[],
+    zoneIdsText: "",
+    workingDaysText: "MON,TUE,WED,THU,FRI,SAT,SUN",
+    workingStart: "06:00",
+    workingEnd: "23:00",
+    pickupRadiusMeters: "300",
+    dropRadiusMeters: "500",
+    maxDetourKm: "3",
+    maxPickupEtaMinutes: "12",
+    gpsFreshnessSeconds: "60",
+    active: true,
+  });
+
+  const [matchingConfig, setMatchingConfig] = useState<MatchingConfiguration>({
+    defaultMode: "HYBRID",
+    locationMatchRadiusMeters: 500,
+    pickupRadiusMeters: 300,
+    dropRadiusMeters: 500,
+    maxDetourKm: 3,
+    maxPickupEtaMinutes: 12,
+    gpsFreshnessSeconds: 60,
+    offerTimeoutSeconds: 30,
+    retryCount: 2,
+    maxPickupDistanceKm: 5,
+    fallbackEnabled: true,
+    fallbackLevels: ["EXACT_ROUTE", "NEARBY_ROUTE", "SAME_ZONE"],
+    onlineOnly: true,
+    excludeBusyDrivers: true,
+    passengerEnabled: true,
+    sharedEnabled: true,
+    parcelEnabled: true,
+    goodsEnabled: true,
+    scheduledEnabled: true,
+  });
+  const [matchingConfigLoading, setMatchingConfigLoading] = useState(false);
+  const [matchingConfigSaving, setMatchingConfigSaving] = useState(false);
+
+
   const [
     selectedRoleId,
     setSelectedRoleId,
@@ -2171,8 +2331,11 @@ function App() {
       path: string,
       options?: RequestInit,
     ) => {
+      const isMultipart =
+        typeof FormData !== "undefined" &&
+        options?.body instanceof FormData;
       const headers: Record<string, string> = {
-        "Content-Type": "application/json",
+        ...(isMultipart ? {} : { "Content-Type": "application/json" }),
         Accept: "application/json",
       };
       const token = getStoredAdminToken();
@@ -2877,6 +3040,202 @@ function App() {
       }
     }, [apiRequest]);
 
+
+  const loadLocationMaster = useCallback(async () => {
+    setLocationLoading(true);
+    setLocationError("");
+    try {
+      try {
+        const response = await apiRequest<LocationMasterRecord[]>("/admin/locations");
+        setLocationRecords(safeArray<LocationMasterRecord>(response.data));
+      } catch {
+        const legacy = await apiRequest<QuickLocation[]>("/admin/quick-locations");
+        setLocationRecords(
+          safeArray<QuickLocation>(legacy.data).map((row) => ({
+            ...row,
+            active: Boolean(row.isActive),
+            pickupAllowed: true,
+            dropAllowed: true,
+          })),
+        );
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setLocationError(message);
+    } finally {
+      setLocationLoading(false);
+    }
+  }, [apiRequest]);
+
+  const captureLocation = useCallback(() => {
+    if (!navigator.geolocation) {
+      showToast("error", "Browser location is not available on this device.");
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        setLocationDraft((current) => ({
+          ...current,
+          latitude: position.coords.latitude.toFixed(6),
+          longitude: position.coords.longitude.toFixed(6),
+        }));
+        showToast("success", "Current location captured. Confirm the place name before saving.");
+      },
+      (error) => showToast("error", error.message || "Unable to capture current location."),
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 10000 },
+    );
+  }, [showToast]);
+
+  const saveLocationMaster = useCallback(async () => {
+    const name = locationDraft.name.trim();
+    const city = locationDraft.city.trim();
+    const latitude = Number(locationDraft.latitude);
+    const longitude = Number(locationDraft.longitude);
+    if (!name || !city) {
+      showToast("error", "City and location name are required.");
+      return;
+    }
+    if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90 ||
+        !Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
+      showToast("error", "Valid latitude and longitude are required.");
+      return;
+    }
+
+    setLocationSaving(true);
+    try {
+      const body = new FormData();
+      body.append("city", city);
+      body.append("cityId", locationDraft.cityId.trim());
+      body.append("name", name);
+      body.append("category", locationDraft.category);
+      body.append("type", locationDraft.type);
+      body.append("address", locationDraft.address.trim());
+      body.append("latitude", String(latitude));
+      body.append("longitude", String(longitude));
+      body.append("pickupAllowed", String(locationDraft.pickupAllowed));
+      body.append("dropAllowed", String(locationDraft.dropAllowed));
+      body.append("pickupRadiusMeters", String(Number(locationDraft.pickupRadiusMeters) || 300));
+      body.append("dropRadiusMeters", String(Number(locationDraft.dropRadiusMeters) || 500));
+      body.append("active", String(locationDraft.active));
+      if (locationPhoto) body.append("photo", locationPhoto);
+
+      await apiRequest("/admin/locations", {
+        method: "POST",
+        headers: { Accept: "application/json" },
+        body,
+      });
+
+      showToast("success", "City location saved.");
+      setLocationDraft((current) => ({ ...current, name: "", address: "", latitude: "", longitude: "" }));
+      setLocationPhoto(null);
+      setLocationPhotoPreview("");
+      await loadLocationMaster();
+    } catch (error) {
+      showToast("error", error instanceof Error ? error.message : "Unable to save location");
+    } finally {
+      setLocationSaving(false);
+    }
+  }, [apiRequest, loadLocationMaster, locationDraft, locationPhoto, showToast]);
+
+  const openGoogleLocation = useCallback((latitude: unknown, longitude: unknown) => {
+    const lat = Number(latitude);
+    const lng = Number(longitude);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+    window.open(`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${lat},${lng}`)}`, "_blank", "noopener,noreferrer");
+  }, []);
+
+  const loadRouteBuilder = useCallback(async () => {
+    setRouteBuilderLoading(true);
+    setRouteBuilderError("");
+    try {
+      const response = await apiRequest<RouteBuilderRecord[]>("/admin/routes");
+      setRouteBuilderRows(safeArray<RouteBuilderRecord>(response.data));
+    } catch (error) {
+      setRouteBuilderError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRouteBuilderLoading(false);
+    }
+  }, [apiRequest]);
+
+  const saveRouteBuilder = useCallback(async () => {
+    const name = routeDraft.name.trim();
+    if (!name || !routeDraft.city.trim()) {
+      showToast("error", "Route name and city are required.");
+      return;
+    }
+    if (!routeDraft.startLocationId || !routeDraft.endLocationId) {
+      showToast("error", "Start and end locations are required.");
+      return;
+    }
+    if (routeDraft.startLocationId === routeDraft.endLocationId) {
+      showToast("error", "Start and end locations must be different.");
+      return;
+    }
+
+    const workingDays = routeDraft.workingDaysText.split(",").map((value) => value.trim().toUpperCase()).filter(Boolean);
+    const zoneIds = routeDraft.zoneIdsText.split(",").map((value) => value.trim()).filter(Boolean);
+
+    setRouteBuilderSaving(true);
+    try {
+      await apiRequest("/admin/routes", {
+        method: "POST",
+        body: JSON.stringify({
+          name,
+          city: routeDraft.city.trim(),
+          cityId: routeDraft.cityId.trim() || null,
+          serviceType: routeDraft.serviceType,
+          vehicleType: routeDraft.vehicleType,
+          matchingMode: routeDraft.matchingMode,
+          startLocationId: routeDraft.startLocationId,
+          endLocationId: routeDraft.endLocationId,
+          stopIds: routeDraft.stopIds,
+          allowedDriverIds: routeDraft.allowedDriverIds,
+          zoneIds,
+          workingDays,
+          workingStart: routeDraft.workingStart,
+          workingEnd: routeDraft.workingEnd,
+          pickupRadiusMeters: Number(routeDraft.pickupRadiusMeters),
+          dropRadiusMeters: Number(routeDraft.dropRadiusMeters),
+          maxDetourKm: Number(routeDraft.maxDetourKm),
+          maxPickupEtaMinutes: Number(routeDraft.maxPickupEtaMinutes),
+          gpsFreshnessSeconds: Number(routeDraft.gpsFreshnessSeconds),
+          active: Boolean(routeDraft.active),
+        }),
+      });
+      showToast("success", "Route configuration saved.");
+      setRouteDraft((current) => ({ ...current, name: "", startLocationId: "", endLocationId: "", stopIds: [], allowedDriverIds: [] }));
+      await loadRouteBuilder();
+    } catch (error) {
+      showToast("error", error instanceof Error ? error.message : "Unable to save route");
+    } finally {
+      setRouteBuilderSaving(false);
+    }
+  }, [apiRequest, loadRouteBuilder, routeDraft, showToast]);
+
+  const loadMatchingConfiguration = useCallback(async () => {
+    setMatchingConfigLoading(true);
+    try {
+      const response = await apiRequest<Partial<MatchingConfiguration>>("/admin/matching/configuration");
+      setMatchingConfig((current) => ({ ...current, ...(response.data ?? {}) }));
+    } catch (error) {
+      showToast("error", error instanceof Error ? error.message : "Unable to load matching configuration");
+    } finally {
+      setMatchingConfigLoading(false);
+    }
+  }, [apiRequest, showToast]);
+
+  const saveMatchingConfiguration = useCallback(async () => {
+    setMatchingConfigSaving(true);
+    try {
+      await apiRequest("/admin/matching/configuration", { method: "PUT", body: JSON.stringify(matchingConfig) });
+      showToast("success", "Matching configuration saved.");
+    } catch (error) {
+      showToast("error", error instanceof Error ? error.message : "Unable to save matching configuration");
+    } finally {
+      setMatchingConfigSaving(false);
+    }
+  }, [apiRequest, matchingConfig, showToast]);
+
   const loadSharedRoutes = useCallback(async () => {
     setSharedRoutesLoading(true);
     setSharedRoutesError("");
@@ -3475,6 +3834,8 @@ function App() {
         case "drivers": void loadDrivers(true); break;
         case "safety": void loadSafety(); break;
         case "adminPresence": if (adminAccess?.isSuperAdmin) void loadAdminPresence(); break;
+        case "locationMaster": void loadLocationMaster(); break;
+        case "routeBuilder": void loadRouteBuilder(); break;
         default: break;
       }
     };
@@ -3488,6 +3849,8 @@ function App() {
     loadBookings,
     loadDrivers,
     loadSafety,
+    loadLocationMaster,
+    loadRouteBuilder,
     realtimeStatus,
   ]);
 
@@ -3514,6 +3877,9 @@ function App() {
       case "roles": void loadRoles(); break;
       case "audit": void loadAuditLogs(); break;
       case "quickLocations": void loadQuickLocations(); break;
+      case "locationMaster": void loadLocationMaster(); break;
+      case "routeBuilder": void loadLocationMaster(); void loadDrivers(true); void loadRouteBuilder(); break;
+      case "matchingConfig": void loadMatchingConfiguration(); break;
       case "reports": void loadBookings(); void loadDrivers(true); break;
       case "settings": void loadIntegrationStatus(); break;
       case "routes": void loadSharedRoutes(); break;
@@ -3525,7 +3891,7 @@ function App() {
       case "adminPresence": void loadAdminPresence(); break;
       default: break;
     }
-  }, [connected, adminAccess, currentScreen, loadDashboard, loadBookings, loadDrivers, loadCustomers, loadSafety, loadAdmins, loadRoles, loadAuditLogs, loadQuickLocations, loadIntegrationStatus, loadSharedRoutes, loadTestData, loadPlatformState, loadPaymentsData, loadPromotionsData, loadSupportData, loadAdminPresence]);
+  }, [connected, adminAccess, currentScreen, loadDashboard, loadBookings, loadDrivers, loadCustomers, loadSafety, loadAdmins, loadRoles, loadAuditLogs, loadQuickLocations, loadLocationMaster, loadRouteBuilder, loadMatchingConfiguration, loadIntegrationStatus, loadSharedRoutes, loadTestData, loadPlatformState, loadPaymentsData, loadPromotionsData, loadSupportData, loadAdminPresence]);
 
   useEffect(() => {
     if (!connected || !adminAccess?.isSuperAdmin || currentScreen !== "adminPresence") return;
@@ -7519,6 +7885,188 @@ function App() {
       );
     };
 
+
+  const renderLocationMaster = () => (
+    <div className="page">
+      <SectionHeader
+        title="City Location Master"
+        subtitle="Create reusable named locations once. These locations become the source for route stops and pickup/drop matching."
+        onRefresh={() => void loadLocationMaster()}
+      />
+      <div className="content-grid two">
+        <Panel title="Add Location" subtitle="Capture GPS, name the place, add a real photo and configure pickup/drop eligibility.">
+          <div className="form-grid">
+            <label><span className="field-label">City</span><input className="text-input" value={locationDraft.city} onChange={(e) => setLocationDraft((c) => ({...c, city:e.target.value}))} placeholder="Katihar" /></label>
+            <label><span className="field-label">City ID</span><input className="text-input" value={locationDraft.cityId} onChange={(e) => setLocationDraft((c) => ({...c, cityId:e.target.value}))} placeholder="Optional backend city ID" /></label>
+            <label><span className="field-label">Location Name</span><input className="text-input" value={locationDraft.name} onChange={(e) => setLocationDraft((c) => ({...c, name:e.target.value}))} placeholder="Katihar Railway Station" /></label>
+            <label><span className="field-label">Location Type</span><select className="select-input" value={locationDraft.type} onChange={(e) => setLocationDraft((c) => ({...c, type:e.target.value}))}><option>LANDMARK</option><option>BUS_STAND</option><option>RAILWAY_STATION</option><option>HOSPITAL</option><option>MARKET</option><option>COLLEGE</option><option>JUNCTION</option><option>OFFICE_AREA</option><option>RESIDENTIAL</option><option>CUSTOM</option></select></label>
+            <label><span className="field-label">Category</span><select className="select-input" value={locationDraft.category} onChange={(e) => setLocationDraft((c) => ({...c, category:e.target.value}))}><option>LANDMARK</option><option>TRANSIT</option><option>MEDICAL</option><option>MARKET</option><option>EDUCATION</option><option>RESIDENTIAL</option><option>COMMERCIAL</option><option>OTHER</option></select></label>
+            <label><span className="field-label">Address</span><input className="text-input" value={locationDraft.address} onChange={(e) => setLocationDraft((c) => ({...c, address:e.target.value}))} placeholder="Verified address" /></label>
+            <label><span className="field-label">Latitude</span><input className="text-input" value={locationDraft.latitude} onChange={(e) => setLocationDraft((c) => ({...c, latitude:e.target.value}))} inputMode="decimal" /></label>
+            <label><span className="field-label">Longitude</span><input className="text-input" value={locationDraft.longitude} onChange={(e) => setLocationDraft((c) => ({...c, longitude:e.target.value}))} inputMode="decimal" /></label>
+            <label><span className="field-label">Pickup Radius (m)</span><input className="text-input" value={locationDraft.pickupRadiusMeters} onChange={(e) => setLocationDraft((c) => ({...c, pickupRadiusMeters:e.target.value}))} inputMode="numeric" /></label>
+            <label><span className="field-label">Drop Radius (m)</span><input className="text-input" value={locationDraft.dropRadiusMeters} onChange={(e) => setLocationDraft((c) => ({...c, dropRadiusMeters:e.target.value}))} inputMode="numeric" /></label>
+          </div>
+          <div className="button-row" style={{marginTop:12}}>
+            <button className="button secondary" type="button" onClick={captureLocation}>Use Current Location</button>
+            <a className="button secondary" href={locationDraft.latitude && locationDraft.longitude ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${locationDraft.latitude},${locationDraft.longitude}`)}` : "#"} target="_blank" rel="noreferrer">Open Google Maps</a>
+            <label className="button secondary" style={{cursor:"pointer"}}>
+              Take / Choose Photo
+              <input type="file" accept="image/*" capture="environment" hidden onChange={(e) => { const file=e.target.files?.[0] ?? null; setLocationPhoto(file); setLocationPhotoPreview(file ? URL.createObjectURL(file) : ""); }} />
+            </label>
+          </div>
+          {locationPhotoPreview ? <div style={{marginTop:12}}><img src={locationPhotoPreview} alt="Location preview" style={{maxWidth:260,maxHeight:170,borderRadius:12,border:"1px solid #e4eaf2",objectFit:"cover"}} /></div> : null}
+          <div className="button-row" style={{marginTop:12}}>
+            <label className="checkbox-row"><input type="checkbox" checked={locationDraft.pickupAllowed} onChange={(e)=>setLocationDraft((c)=>({...c,pickupAllowed:e.target.checked}))}/><span>Pickup allowed</span></label>
+            <label className="checkbox-row"><input type="checkbox" checked={locationDraft.dropAllowed} onChange={(e)=>setLocationDraft((c)=>({...c,dropAllowed:e.target.checked}))}/><span>Drop allowed</span></label>
+            <label className="checkbox-row"><input type="checkbox" checked={locationDraft.active} onChange={(e)=>setLocationDraft((c)=>({...c,active:e.target.checked}))}/><span>Active</span></label>
+          </div>
+          <div className="button-row" style={{marginTop:14}}>
+            <button className="button primary" type="button" onClick={() => void saveLocationMaster()} disabled={locationSaving}>{locationSaving ? "Saving…" : "Save City Location"}</button>
+          </div>
+        </Panel>
+        <Panel title="Location Master" subtitle={`${formatNumber(locationRecords.length)} saved locations`}>
+          {locationLoading ? <LoadingState message="Loading locations…" /> : locationError ? <ErrorState message={locationError} onRetry={() => void loadLocationMaster()} /> : locationRecords.length === 0 ? <EmptyState title="No locations" message="Create the first city location above." /> : (
+            <div className="table-wrapper"><table><thead><tr><th>Photo</th><th>City</th><th>Location</th><th>Coordinates</th><th>Rules</th><th>Status</th><th>Map</th></tr></thead><tbody>
+              {locationRecords.map((location) => <tr key={location.id}>
+                <td>{location.photoUrl ? <img src={String(location.photoUrl)} alt="" style={{width:44,height:44,borderRadius:8,objectFit:"cover"}}/> : <span className="tag">NO PHOTO</span>}</td>
+                <td>{location.city ?? "—"}</td>
+                <td><strong>{location.name ?? "Unnamed"}</strong><div className="cell-sub">{location.address ?? "No address"}</div></td>
+                <td>{displayValue(location.latitude)}, {displayValue(location.longitude)}</td>
+                <td><div className="cell-stack"><span>Pickup {location.pickupAllowed === false ? "No" : "Yes"}</span><span className="cell-sub">Drop {location.dropAllowed === false ? "No" : "Yes"} · {Number(location.pickupRadiusMeters ?? 0)}m / {Number(location.dropRadiusMeters ?? 0)}m</span></div></td>
+                <td><StatusBadge value={(location.active ?? location.isActive) ? "ACTIVE" : "INACTIVE"} /></td>
+                <td><button className="button secondary small" type="button" onClick={() => openGoogleLocation(location.latitude, location.longitude)}>Google Maps</button></td>
+              </tr>)}
+            </tbody></table></div>
+          )}
+        </Panel>
+      </div>
+    </div>
+  );
+
+  const renderRouteBuilder = () => {
+    const locationById = new Map(locationRecords.map((location) => [location.id, location]));
+    const orderedStops = routeDraft.stopIds.map((id) => locationById.get(id)).filter(Boolean) as LocationMasterRecord[];
+    const toggleStop = (id: string) => setRouteDraft((current) => ({...current, stopIds: current.stopIds.includes(id) ? current.stopIds.filter((x)=>x!==id) : [...current.stopIds,id]}));
+    const toggleDriver = (id: string) => setRouteDraft((current) => ({...current, allowedDriverIds: current.allowedDriverIds.includes(id) ? current.allowedDriverIds.filter((x)=>x!==id) : [...current.allowedDriverIds,id]}));
+    const moveStop = (id: string, direction: -1 | 1) => setRouteDraft((current) => {
+      const index=current.stopIds.indexOf(id); if(index<0) return current;
+      const next=index+direction; if(next<0 || next>=current.stopIds.length) return current;
+      const ids=[...current.stopIds]; [ids[index],ids[next]]=[ids[next],ids[index]]; return {...current,stopIds:ids};
+    });
+    return <div className="page">
+      <SectionHeader title="Route Builder" subtitle="Build a reusable multi-stop city route, then assign eligible drivers and matching rules." onRefresh={() => { void loadLocationMaster(); void loadDrivers(true); void loadRouteBuilder(); }} />
+      <div className="content-grid two">
+        <Panel title="Route Configuration" subtitle="Locations are selected from the City Location Master.">
+          <div className="form-grid">
+            <label><span className="field-label">City</span><input className="text-input" value={routeDraft.city} onChange={(e)=>setRouteDraft((c)=>({...c,city:e.target.value}))} placeholder="Katihar"/></label>
+            <label><span className="field-label">City ID</span><input className="text-input" value={routeDraft.cityId} onChange={(e)=>setRouteDraft((c)=>({...c,cityId:e.target.value}))}/></label>
+            <label><span className="field-label">Route Name</span><input className="text-input" value={routeDraft.name} onChange={(e)=>setRouteDraft((c)=>({...c,name:e.target.value}))} placeholder="Katihar Main Route 01"/></label>
+            <label><span className="field-label">Matching Mode</span><select className="select-input" value={routeDraft.matchingMode} onChange={(e)=>setRouteDraft((c)=>({...c,matchingMode:e.target.value}))}><option>HYBRID</option><option>AUTOMATIC</option><option>ADMIN_CONTROLLED</option></select></label>
+            <label><span className="field-label">Service Type</span><select className="select-input" value={routeDraft.serviceType} onChange={(e)=>setRouteDraft((c)=>({...c,serviceType:e.target.value}))}><option>PASSENGER</option><option>PARCEL</option><option>GOODS</option><option>SHARED</option><option>CONNECTING</option></select></label>
+            <label><span className="field-label">Vehicle Type</span><select className="select-input" value={routeDraft.vehicleType} onChange={(e)=>setRouteDraft((c)=>({...c,vehicleType:e.target.value}))}><option>E_RICKSHAW</option><option>PICKUP_TRUCK</option><option>AUTO</option></select></label>
+            <label><span className="field-label">Working Start</span><input className="text-input" type="time" value={routeDraft.workingStart} onChange={(e)=>setRouteDraft((c)=>({...c,workingStart:e.target.value}))}/></label>
+            <label><span className="field-label">Working End</span><input className="text-input" type="time" value={routeDraft.workingEnd} onChange={(e)=>setRouteDraft((c)=>({...c,workingEnd:e.target.value}))}/></label>
+            <label><span className="field-label">Pickup Radius (m)</span><input className="text-input" value={routeDraft.pickupRadiusMeters} onChange={(e)=>setRouteDraft((c)=>({...c,pickupRadiusMeters:e.target.value}))}/></label>
+            <label><span className="field-label">Drop Radius (m)</span><input className="text-input" value={routeDraft.dropRadiusMeters} onChange={(e)=>setRouteDraft((c)=>({...c,dropRadiusMeters:e.target.value}))}/></label>
+            <label><span className="field-label">Max Detour (km)</span><input className="text-input" value={routeDraft.maxDetourKm} onChange={(e)=>setRouteDraft((c)=>({...c,maxDetourKm:e.target.value}))}/></label>
+            <label><span className="field-label">Max Pickup ETA (min)</span><input className="text-input" value={routeDraft.maxPickupEtaMinutes} onChange={(e)=>setRouteDraft((c)=>({...c,maxPickupEtaMinutes:e.target.value}))}/></label>
+            <label><span className="field-label">GPS Freshness (sec)</span><input className="text-input" value={routeDraft.gpsFreshnessSeconds} onChange={(e)=>setRouteDraft((c)=>({...c,gpsFreshnessSeconds:e.target.value}))}/></label>
+            <label><span className="field-label">Allowed Zones (comma-separated)</span><input className="text-input" value={routeDraft.zoneIdsText} onChange={(e)=>setRouteDraft((c)=>({...c,zoneIdsText:e.target.value}))}/></label>
+          </div>
+          <label className="field-label" style={{display:"block",marginTop:16}}>Start Location</label>
+          <select className="select-input" value={routeDraft.startLocationId} onChange={(e)=>setRouteDraft((c)=>({...c,startLocationId:e.target.value}))}><option value="">Select start location</option>{locationRecords.filter((x)=>x.active !== false && x.isActive !== false).map((location)=><option key={location.id} value={location.id}>{location.name} · {location.city}</option>)}</select>
+          <label className="field-label" style={{display:"block",marginTop:12}}>End Location</label>
+          <select className="select-input" value={routeDraft.endLocationId} onChange={(e)=>setRouteDraft((c)=>({...c,endLocationId:e.target.value}))}><option value="">Select end location</option>{locationRecords.filter((x)=>x.active !== false && x.isActive !== false).map((location)=><option key={location.id} value={location.id}>{location.name} · {location.city}</option>)}</select>
+          <div style={{marginTop:16}}>
+            <div className="panel-header"><div><h3>Ordered Route Stops</h3><p>Select locations and then reorder them.</p></div></div>
+            {locationRecords.length === 0 ? <EmptyState title="Create locations first" message="Route stops come from City Location Master."/> :
+              <div style={{display:"grid",gap:8,maxHeight:270,overflowY:"auto"}}>
+                {locationRecords.map((location) => {
+                  const selected=routeDraft.stopIds.includes(location.id);
+                  const sequence=routeDraft.stopIds.indexOf(location.id)+1;
+                  return <div key={location.id} className="table-row" style={{border:"1px solid #e4eaf2",borderRadius:10,padding:9}}>
+                    <label className="checkbox-row" style={{flex:1}}><input type="checkbox" checked={selected} onChange={()=>toggleStop(location.id)}/><span><strong>{location.name}</strong><small className="cell-sub">{location.address || location.city}</small></span></label>
+                    {selected ? <><span className="tag emphasis">#{sequence}</span><button className="button secondary small" type="button" onClick={()=>moveStop(location.id,-1)}>↑</button><button className="button secondary small" type="button" onClick={()=>moveStop(location.id,1)}>↓</button></> : null}
+                  </div>
+                })}
+              </div>}
+          </div>
+          <div className="info-box"><strong>Selected route</strong><p>{orderedStops.length ? orderedStops.map((x,i)=>`${i+1}. ${x.name}`).join(" → ") : "No stops selected yet."}</p></div>
+          <div style={{marginTop:14}}>
+            <div className="panel-header"><div><h3>Allowed Drivers</h3><p>Admin Controlled/Hybrid modes can restrict the driver pool. Automatic mode can leave this empty.</p></div></div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(2,minmax(0,1fr))",gap:8,maxHeight:240,overflowY:"auto"}}>
+              {drivers.map((driver)=><label key={driver.id} className="checkbox-row" style={{border:"1px solid #e4eaf2",borderRadius:10,padding:9}}><input type="checkbox" checked={routeDraft.allowedDriverIds.includes(driver.id)} onChange={()=>toggleDriver(driver.id)}/><span><strong>{driver.fullName || driver.id}</strong><small className="cell-sub">{humanize(driver.driverStatus)} · {humanize(driver.verificationStatus)}</small></span></label>)}
+            </div>
+          </div>
+          <div className="button-row" style={{marginTop:14}}><button className="button primary" type="button" onClick={()=>void saveRouteBuilder()} disabled={routeBuilderSaving}>{routeBuilderSaving ? "Saving…" : "Save Route"}</button><button className="button secondary" type="button" onClick={()=>setRouteDraft((c)=>({...c,stopIds:[],allowedDriverIds:[]}))}>Clear Stops / Drivers</button></div>
+        </Panel>
+        <Panel title="Configured Routes" subtitle={`${formatNumber(routeBuilderRows.length)} saved route definitions`}>
+          {routeBuilderLoading ? <LoadingState message="Loading routes…" /> : routeBuilderError ? <ErrorState message={routeBuilderError} onRetry={()=>void loadRouteBuilder()} /> : routeBuilderRows.length===0 ? <EmptyState title="No routes configured" message="Create the first route using saved locations." /> :
+            <div style={{display:"grid",gap:10}}>
+              {routeBuilderRows.map((route)=><div className="panel" key={route.id} style={{boxShadow:"none",border:"1px solid #e4eaf2"}}>
+                <div className="panel-header"><div><p className="eyebrow">{route.city || "CITY"}</p><h3>{route.name || "Route"}</h3><p>{humanize(route.matchingMode)} · {humanize(route.serviceType)} · {humanize(route.vehicleType)}</p></div><StatusBadge value={route.active ? "ACTIVE" : route.status || "INACTIVE"} /></div>
+                <div className="detail-grid compact-grid">
+                  <div><span>Start</span><strong>{route.startLocation?.name || shortId(route.startLocationId)}</strong></div>
+                  <div><span>End</span><strong>{route.endLocation?.name || shortId(route.endLocationId)}</strong></div>
+                  <div><span>Stops</span><strong>{formatNumber(route.stopIds?.length ?? route.stops?.length ?? 0)}</strong></div>
+                  <div><span>Drivers</span><strong>{formatNumber(route.allowedDriverIds?.length ?? route.allowedDrivers?.length ?? 0)}</strong></div>
+                  <div><span>Detour</span><strong>{displayValue(route.maxDetourKm)} km</strong></div>
+                  <div><span>Max ETA</span><strong>{displayValue(route.maxPickupEtaMinutes)} min</strong></div>
+                </div>
+              </div>)}
+            </div>}
+        </Panel>
+      </div>
+    </div>
+  };
+
+  const renderMatchingConfiguration = () => (
+    <div className="page">
+      <SectionHeader title="Matching Configuration" subtitle="One-time deterministic rules for Customer → Route → Eligible Driver matching." onRefresh={() => void loadMatchingConfiguration()} />
+      <div className="content-grid two">
+        <Panel title="Core matching rules" subtitle="Defaults used by automatic/hybrid matching. Individual routes may override route-specific values.">
+          <div className="form-grid">
+            <label><span className="field-label">Default Mode</span><select className="select-input" value={matchingConfig.defaultMode} onChange={(e)=>setMatchingConfig((c)=>({...c,defaultMode:e.target.value as MatchingConfiguration["defaultMode"]}))}><option>HYBRID</option><option>AUTOMATIC</option><option>ADMIN_CONTROLLED</option></select></label>
+            <label><span className="field-label">Location Match Radius (m)</span><input className="text-input" value={matchingConfig.locationMatchRadiusMeters} onChange={(e)=>setMatchingConfig((c)=>({...c,locationMatchRadiusMeters:Number(e.target.value)}))}/></label>
+            <label><span className="field-label">Pickup Radius (m)</span><input className="text-input" value={matchingConfig.pickupRadiusMeters} onChange={(e)=>setMatchingConfig((c)=>({...c,pickupRadiusMeters:Number(e.target.value)}))}/></label>
+            <label><span className="field-label">Drop Radius (m)</span><input className="text-input" value={matchingConfig.dropRadiusMeters} onChange={(e)=>setMatchingConfig((c)=>({...c,dropRadiusMeters:Number(e.target.value)}))}/></label>
+            <label><span className="field-label">Maximum Detour (km)</span><input className="text-input" value={matchingConfig.maxDetourKm} onChange={(e)=>setMatchingConfig((c)=>({...c,maxDetourKm:Number(e.target.value)}))}/></label>
+            <label><span className="field-label">Maximum Pickup ETA (min)</span><input className="text-input" value={matchingConfig.maxPickupEtaMinutes} onChange={(e)=>setMatchingConfig((c)=>({...c,maxPickupEtaMinutes:Number(e.target.value)}))}/></label>
+            <label><span className="field-label">GPS Freshness (sec)</span><input className="text-input" value={matchingConfig.gpsFreshnessSeconds} onChange={(e)=>setMatchingConfig((c)=>({...c,gpsFreshnessSeconds:Number(e.target.value)}))}/></label>
+            <label><span className="field-label">Offer Timeout (sec)</span><input className="text-input" value={matchingConfig.offerTimeoutSeconds} onChange={(e)=>setMatchingConfig((c)=>({...c,offerTimeoutSeconds:Number(e.target.value)}))}/></label>
+            <label><span className="field-label">Retry Count</span><input className="text-input" value={matchingConfig.retryCount} onChange={(e)=>setMatchingConfig((c)=>({...c,retryCount:Number(e.target.value)}))}/></label>
+            <label><span className="field-label">Max Pickup Distance (km)</span><input className="text-input" value={matchingConfig.maxPickupDistanceKm} onChange={(e)=>setMatchingConfig((c)=>({...c,maxPickupDistanceKm:Number(e.target.value)}))}/></label>
+          </div>
+          <div className="button-row" style={{marginTop:14}}>
+            <label className="checkbox-row"><input type="checkbox" checked={matchingConfig.onlineOnly} onChange={(e)=>setMatchingConfig((c)=>({...c,onlineOnly:e.target.checked}))}/><span>Online drivers only</span></label>
+            <label className="checkbox-row"><input type="checkbox" checked={matchingConfig.excludeBusyDrivers} onChange={(e)=>setMatchingConfig((c)=>({...c,excludeBusyDrivers:e.target.checked}))}/><span>Exclude busy/on-trip drivers</span></label>
+            <label className="checkbox-row"><input type="checkbox" checked={matchingConfig.fallbackEnabled} onChange={(e)=>setMatchingConfig((c)=>({...c,fallbackEnabled:e.target.checked}))}/><span>Enable fallback matching</span></label>
+          </div>
+        </Panel>
+        <Panel title="Ride-type eligibility" subtitle="Enable matching for the business types used by RideX.">
+          <div style={{display:"grid",gap:10}}>
+            {([
+              ["passengerEnabled","Passenger"],
+              ["sharedEnabled","Shared Ride"],
+              ["parcelEnabled","Parcel"],
+              ["goodsEnabled","Goods"],
+              ["scheduledEnabled","Scheduled"],
+            ] as const).map(([key,label])=>(
+              <label key={key} className="checkbox-row" style={{border:"1px solid #e4eaf2",padding:10,borderRadius:10}}><input type="checkbox" checked={matchingConfig[key]} onChange={(e)=>setMatchingConfig((c)=>({...c,[key]:e.target.checked}))}/><span><strong>{label}</strong><small className="cell-sub">Route compatibility and driver eligibility are evaluated before offer creation.</small></span></label>
+            ))}
+          </div>
+          <div className="info-box"><strong>Fallback order</strong><p>{matchingConfig.fallbackLevels.join(" → ")}</p></div>
+        </Panel>
+      </div>
+      <Panel title="Matching lifecycle" subtitle="The backend remains authoritative; this panel defines allowed deterministic policy.">
+        <div className="content-grid four">
+          {["Customer A → B","Recognize saved locations","Find compatible routes","Filter eligible drivers","Check GPS / ETA / capacity / detour","Offer request","Accept / reject / timeout","Fallback or no-driver result"].map((step,index)=><div className="panel" key={step} style={{boxShadow:"none",border:"1px solid #e4eaf2"}}><span className="eyebrow">STEP {index+1}</span><h3 style={{marginTop:6}}>{step}</h3></div>)}
+        </div>
+        <div className="button-row" style={{marginTop:14}}><button className="button primary" type="button" onClick={()=>void saveMatchingConfiguration()} disabled={matchingConfigSaving || matchingConfigLoading}>{matchingConfigSaving ? "Saving…" : "Save Matching Configuration"}</button></div>
+      </Panel>
+    </div>
+  );
   const renderKyc = () => {
     const documents = drivers.flatMap((driver) =>
       safeArray<NonNullable<Driver["documents"]>[number]>(
@@ -8767,6 +9315,15 @@ function App() {
 
         case "quickLocations":
           return renderQuickLocations();
+
+        case "locationMaster":
+          return renderLocationMaster();
+
+        case "routeBuilder":
+          return renderRouteBuilder();
+
+        case "matchingConfig":
+          return renderMatchingConfiguration();
 
         case "setup":
           return renderSetup();
