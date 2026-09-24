@@ -78,7 +78,8 @@ type Screen =
   | "security"
   | "monitoring"
   | "kyc"
-  | "routes";
+  | "routes"
+  | "adminPresence";
 
 type ApiResponse<T> = {
   success?: boolean;
@@ -338,6 +339,106 @@ type RealtimeStatus =
   | "connecting"
   | "connected"
   | "reconnecting";
+
+
+type AdminAccessContext = {
+  adminId: string;
+  userId: string;
+  name: string;
+  mobile: string;
+  email?: string | null;
+  role: string;
+  approvalStatus: string;
+  permissions: Array<{ id: string; module: string; action: string }>;
+  isSuperAdmin: boolean;
+};
+
+type AdminPresenceSession = {
+  adminId: string;
+  userId: string;
+  name: string;
+  mobile: string;
+  email?: string | null;
+  role: string;
+  sessionId: string;
+  status: "ONLINE" | "OFFLINE";
+  onlineReason: string;
+  createdAt?: string | null;
+  lastSeenAt?: string | null;
+  expiresAt?: string | null;
+  revokedAt?: string | null;
+  deviceInfo?: string | null;
+  ipAddress?: string | null;
+};
+
+const ADMIN_PRESENCE_STALE_MS = 10 * 60 * 1000;
+
+const ROLE_SCREEN_ACCESS: Record<string, Screen[]> = {
+  SUPER_ADMIN: [
+    "dashboard","liveOperations","quickRide","drivers","bookings","customers","safety","admins","roles","audit","quickLocations","setup","payments","reports","pricing","settings","support","notifications","vehicles","promotions","platform","matching","events","finance","security","monitoring","kyc","routes","adminPresence",
+  ],
+  OPERATIONS: ["dashboard","liveOperations","quickRide","matching","events","bookings","customers","drivers","vehicles","quickLocations","routes","reports","notifications","safety"],
+  FINANCE: ["dashboard","finance","payments","reports","pricing","promotions","notifications","bookings"],
+  SAFETY: ["dashboard","liveOperations","events","bookings","customers","drivers","safety","reports","notifications"],
+  SUPPORT: ["dashboard","bookings","customers","drivers","support","notifications","reports"],
+  VERIFICATION_KYC: ["dashboard","drivers","kyc","vehicles","customers","reports","notifications"],
+};
+
+const ROLE_TOOLBOX: Record<string, Array<{ screen: Screen; label: string; description: string; icon: string }>> = {
+  SUPER_ADMIN: [
+    {screen:"adminPresence",label:"Admin Presence",description:"View all Admin sessions, login source and live status.",icon:"admin"},
+    {screen:"liveOperations",label:"Live Operations",description:"Live rides, drivers and operational map.",icon:"map"},
+    {screen:"finance",label:"Finance",description:"Finance and settlement workspace.",icon:"wallet"},
+    {screen:"safety",label:"Safety / SOS",description:"Safety incidents and emergency operations.",icon:"safety"},
+    {screen:"support",label:"Support",description:"Customer and driver support cases.",icon:"support"},
+    {screen:"kyc",label:"Verification / KYC",description:"Driver and document verification.",icon:"file"},
+    {screen:"roles",label:"Roles & Permissions",description:"Manage Admin access control.",icon:"roles"},
+    {screen:"audit",label:"Audit Logs",description:"Review administrative actions.",icon:"audit"},
+    {screen:"settings",label:"System Settings",description:"Authorized system settings and integrations.",icon:"settings"},
+    {screen:"monitoring",label:"Monitoring / Recovery",description:"Platform diagnostics, recovery and health tools.",icon:"database"},
+  ],
+  OPERATIONS: [
+    {screen:"liveOperations",label:"Live Operations",description:"Current rides and driver movement.",icon:"map"},
+    {screen:"matching",label:"Matching",description:"Ride and driver matching operations.",icon:"activity"},
+    {screen:"quickRide",label:"Quick Ride",description:"Create an operational ride using backend rules.",icon:"plus"},
+    {screen:"drivers",label:"Drivers",description:"Driver status and operational details.",icon:"driver"},
+    {screen:"vehicles",label:"Vehicles",description:"Vehicle readiness and availability.",icon:"vehicle"},
+    {screen:"quickLocations",label:"Quick Locations",description:"Operational location catalogue.",icon:"map"},
+    {screen:"reports",label:"Operations Reports",description:"Operational metrics and booking trends.",icon:"chart"},
+  ],
+  FINANCE: [
+    {screen:"finance",label:"Finance",description:"Finance and settlement workspace.",icon:"wallet"},
+    {screen:"payments",label:"Payments",description:"Payment records and financial references.",icon:"payment"},
+    {screen:"pricing",label:"Pricing / Commission",description:"Pricing rules and commission controls.",icon:"percent"},
+    {screen:"reports",label:"Finance Reports",description:"Finance-related reporting tools.",icon:"chart"},
+    {screen:"promotions",label:"Promotions",description:"Authorized promotion controls.",icon:"promo"},
+  ],
+  SAFETY: [
+    {screen:"safety",label:"Safety / SOS",description:"Open SOS and safety incidents.",icon:"safety"},
+    {screen:"liveOperations",label:"Live Safety Map",description:"Operational ride and driver context.",icon:"map"},
+    {screen:"drivers",label:"Driver Safety View",description:"Relevant driver and location context.",icon:"driver"},
+    {screen:"reports",label:"Safety Reports",description:"Safety and incident reporting.",icon:"chart"},
+  ],
+  SUPPORT: [
+    {screen:"support",label:"Support Cases",description:"Manage support queue and disputes.",icon:"support"},
+    {screen:"customers",label:"Customer Lookup",description:"Open customer operational context.",icon:"users"},
+    {screen:"bookings",label:"Ride Lookup",description:"Inspect ride context for support work.",icon:"list"},
+    {screen:"drivers",label:"Driver Lookup",description:"Inspect driver context for support work.",icon:"driver"},
+    {screen:"reports",label:"Support Reports",description:"Support workload and case reporting.",icon:"chart"},
+  ],
+  VERIFICATION_KYC: [
+    {screen:"kyc",label:"KYC Queue",description:"Review verification cases and documents.",icon:"file"},
+    {screen:"drivers",label:"Driver Verification",description:"Open the driver verification workflow.",icon:"driver"},
+    {screen:"vehicles",label:"Vehicle Documents",description:"Review vehicle-related records.",icon:"vehicle"},
+    {screen:"reports",label:"KYC Reports",description:"Verification workload and status reporting.",icon:"chart"},
+  ],
+};
+
+function isScreenAllowed(role: string | undefined, screen: Screen): boolean {
+  const normalized = String(role ?? "").toUpperCase();
+  if (normalized === "SUPER_ADMIN") return true;
+  return (ROLE_SCREEN_ACCESS[normalized] ?? ROLE_SCREEN_ACCESS.OPERATIONS).includes(screen);
+}
 
 type RealtimeEventEnvelope = {
   id: string;
@@ -689,6 +790,13 @@ const RIDEX_ADMIN_THEME = `
   }
 `;
 
+/*
+ * RIDEX-REF-APK-CATALOG
+ * Reference source: supplied APK analysis. Feature/UX/workflow reference only.
+ * RideX runtime implementation, APIs, credentials, storage and security are RideX-owned.
+ * Sensitive values from the reference APK are never reused or exposed here.
+ */
+
 const DEFAULT_API_BASE = (
   (import.meta as any)?.env?.VITE_RIDEX_API_URL ||
   "http://localhost:4000/api/v1"
@@ -757,6 +865,7 @@ const NAV_ITEMS: Array<{
   { id: "settings", label: "Settings", icon: "settings" },
   { id: "setup", label: "Test Setup", icon: "setup" },
   { id: "platform", label: "Test / Live Control", icon: "activity" },
+  { id: "adminPresence", label: "Admin Presence & Sessions", icon: "admin" },
 ];
 
 const VERIFICATION_STATUSES = [
@@ -1970,6 +2079,21 @@ function App() {
     setServerMessage,
   ] = useState("");
 
+  const [adminAccess, setAdminAccess] = useState<AdminAccessContext | null>(null);
+  const [adminPresenceRows, setAdminPresenceRows] = useState<AdminPresenceSession[]>([]);
+  const [adminPresenceLoading, setAdminPresenceLoading] = useState(false);
+  const [adminPresenceError, setAdminPresenceError] = useState("");
+  const [quickRideDraft, setQuickRideDraft] = useState({
+    customerId: "",
+    serviceType: "PASSENGER",
+    pickup: "",
+    drop: "",
+    rideType: "FULL_RIDE",
+    paymentMethod: "CASH",
+    driverId: "auto",
+    vehicleType: "auto",
+  });
+
   const effectiveApiBase = DEFAULT_API_BASE;
 
   const showToast = useCallback(
@@ -1988,6 +2112,59 @@ function App() {
     },
     []
   );
+
+  const loadAdminContext = useCallback(async (authToken = getStoredAdminToken()) => {
+    if (!authToken) {
+      setAdminAccess(null);
+      return null;
+    }
+
+    const response = await fetch(`${effectiveApiBase}/admin/me`, {
+      headers: { Authorization: `Bearer ${authToken}`, Accept: "application/json" },
+      cache: "no-store",
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.success === false || !data.data) {
+      throw new Error(data.message || "Unable to load Admin access context");
+    }
+
+    const context: AdminAccessContext = {
+      adminId: String(data.data.adminId ?? ""),
+      userId: String(data.data.userId ?? ""),
+      name: String(data.data.name ?? "Admin"),
+      mobile: String(data.data.mobile ?? ""),
+      email: data.data.email ?? null,
+      role: String(data.data.role ?? "").toUpperCase(),
+      approvalStatus: String(data.data.approvalStatus ?? ""),
+      permissions: Array.isArray(data.data.permissions) ? data.data.permissions : [],
+      isSuperAdmin: Boolean(data.data.isSuperAdmin),
+    };
+
+    setAdminAccess(context);
+    return context;
+  }, [effectiveApiBase]);
+
+  const loadAdminPresence = useCallback(async () => {
+    if (!adminAccess?.isSuperAdmin) return;
+    setAdminPresenceLoading(true);
+    setAdminPresenceError("");
+    try {
+      const token = getStoredAdminToken();
+      const response = await fetch(`${effectiveApiBase}/admin/admin-presence`, {
+        headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+        cache: "no-store",
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || body.success === false) {
+        throw new Error(body.message || "Unable to load Admin presence");
+      }
+      setAdminPresenceRows(Array.isArray(body.data) ? body.data : []);
+    } catch (error) {
+      setAdminPresenceError(error instanceof Error ? error.message : "Unable to load Admin presence");
+    } finally {
+      setAdminPresenceLoading(false);
+    }
+  }, [adminAccess?.isSuperAdmin, effectiveApiBase]);
 
   const apiRequest = useCallback(
     async <T,>(
@@ -2227,19 +2404,37 @@ function App() {
     } catch (error) { showToast("error", error instanceof Error ? error.message : `Unable to update ${key}`); }
   }, [apiRequest, integrationValues, loadIntegrationStatus]);
 
-  const loadOperationsData = useCallback(async () => {
+  const loadPaymentsData = useCallback(async () => {
     setOperationLoading(true);
     try {
-      const [payments, promotions, support] = await Promise.all([
-        apiRequest<any[]>("/admin/payments"),
-        apiRequest<any[]>("/admin/promotions"),
-        apiRequest<any[]>("/support/admin/cases"),
-      ]);
-      setPaymentRows(Array.isArray(payments.data) ? payments.data : []);
-      setPromotionRows(Array.isArray(promotions.data) ? promotions.data : []);
-      setSupportRows(Array.isArray(support.data) ? support.data : []);
+      const response = await apiRequest<any[]>("/admin/payments");
+      setPaymentRows(Array.isArray(response.data) ? response.data : []);
     } catch (error) {
-      showToast("error", error instanceof Error ? error.message : "Unable to load operations data");
+      showToast("error", error instanceof Error ? error.message : "Unable to load payments");
+    } finally {
+      setOperationLoading(false);
+    }
+  }, [apiRequest, showToast]);
+
+  const loadPromotionsData = useCallback(async () => {
+    setOperationLoading(true);
+    try {
+      const response = await apiRequest<any[]>("/admin/promotions");
+      setPromotionRows(Array.isArray(response.data) ? response.data : []);
+    } catch (error) {
+      showToast("error", error instanceof Error ? error.message : "Unable to load promotions");
+    } finally {
+      setOperationLoading(false);
+    }
+  }, [apiRequest, showToast]);
+
+  const loadSupportData = useCallback(async () => {
+    setOperationLoading(true);
+    try {
+      const response = await apiRequest<any[]>("/support/admin/cases");
+      setSupportRows(Array.isArray(response.data) ? response.data : []);
+    } catch (error) {
+      showToast("error", error instanceof Error ? error.message : "Unable to load support cases");
     } finally {
       setOperationLoading(false);
     }
@@ -2255,9 +2450,9 @@ function App() {
     try {
       await apiRequest("/admin/promotions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code, discountType: "FIXED", discountValue: value, validFrom: from.toISOString(), validUntil: until.toISOString(), rideScope: "ALL" }) });
       showToast("success", "Promotion created");
-      await loadOperationsData();
+      await loadPromotionsData();
     } catch (error) { showToast("error", error instanceof Error ? error.message : "Unable to create promotion"); }
-  }, [apiRequest, loadOperationsData, showToast]);
+  }, [apiRequest, loadPromotionsData, showToast]);
 
   const sendBroadcast = useCallback(async () => {
     if (!notificationTitle.trim() || !notificationBody.trim()) return showToast("error", "Title and message are required");
@@ -2918,7 +3113,7 @@ function App() {
       setSupportReply("");
       setSupportAttachmentUrl("");
       await openSupportCase(caseId);
-      await loadOperationsData();
+      await loadSupportData();
     } catch (error) {
       showToast(
         "error",
@@ -2929,7 +3124,7 @@ function App() {
     }
   }, [
     apiRequest,
-    loadOperationsData,
+    loadSupportData,
     openSupportCase,
     selectedSupportCase,
     showToast,
@@ -2937,30 +3132,14 @@ function App() {
     supportReply,
   ]);
 
-  const runInitialLoad =
-    useCallback(async () => {
-      setGlobalLoading(true);
-
-      try {
-        // Avoid an AuthSession/DB connection burst during startup.
-        await loadDashboard();
-        await Promise.all([loadDrivers(), loadBookings(), loadCustomers()]);
-        await Promise.all([loadSafety(), loadAdmins(), loadRoles()]);
-        await Promise.all([loadAuditLogs(), loadQuickLocations()]);
-      } finally {
-        setGlobalLoading(false);
-      }
-    }, [
-      loadDashboard,
-      loadDrivers,
-      loadBookings,
-      loadCustomers,
-      loadSafety,
-      loadAdmins,
-      loadRoles,
-      loadAuditLogs,
-      loadQuickLocations,
-    ]);
+  const runInitialLoad = useCallback(async () => {
+    setGlobalLoading(true);
+    try {
+      await loadDashboard();
+    } finally {
+      setGlobalLoading(false);
+    }
+  }, [loadDashboard]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2997,8 +3176,9 @@ function App() {
           saveStoredAdminRecordId(resolvedAdminId);
           setAdminUserId(resolvedUserId);
           setAdminRecordId(resolvedAdminId);
-          setConnected(true);
         }
+        await loadAdminContext(token);
+        if (!cancelled) setConnected(true);
       } catch {
         if (!cancelled) {
           saveStoredAdminToken("");
@@ -3014,7 +3194,7 @@ function App() {
     })();
 
     return () => { cancelled = true; };
-  }, []);
+  }, [loadAdminContext]);
 
   useEffect(() => {
     if (!connected || !sessionValidated) return;
@@ -3036,58 +3216,39 @@ function App() {
 
   const refreshForRealtimeEvent = useCallback(
     (eventType: string) => {
-      const normalized = String(eventType ?? "")
-        .trim()
-        .toUpperCase();
+      const normalized = String(eventType ?? "").trim().toUpperCase();
+      const isDashboard = currentScreen === "dashboard" && Boolean(adminAccess?.isSuperAdmin);
 
-      if (
-        normalized === "DRIVER_ONLINE" ||
-        normalized === "DRIVER_OFFLINE" ||
-        normalized === "GPS_UPDATED"
-      ) {
-        void loadDrivers(true);
+      if (normalized === "DRIVER_ONLINE" || normalized === "DRIVER_OFFLINE" || normalized === "GPS_UPDATED") {
+        if (["liveOperations", "matching", "drivers"].includes(currentScreen)) void loadDrivers(true);
+        else if (isDashboard) void loadDashboard();
         return;
       }
 
-      if (
-        normalized.includes("REQUEST_") ||
-        normalized.includes("DRIVER_ARRIVING") ||
-        normalized.includes("DRIVER_ARRIVED") ||
-        normalized.includes("TRIP_") ||
-        normalized === "OTP_VERIFIED" ||
-        normalized === "ROUTE_CHANGED"
-      ) {
-        void loadBookings();
-        void loadDrivers(true);
+      if (normalized.includes("REQUEST_") || normalized.includes("DRIVER_ARRIVING") || normalized.includes("DRIVER_ARRIVED") || normalized.includes("TRIP_") || normalized === "OTP_VERIFIED" || normalized === "ROUTE_CHANGED") {
+        if (["liveOperations", "matching", "bookings"].includes(currentScreen)) {
+          void loadBookings();
+          void loadDrivers(true);
+        } else if (isDashboard) {
+          void loadDashboard();
+        }
         return;
       }
 
-      if (
-        normalized === "SOS_TRIGGERED" ||
-        normalized.startsWith("SAFETY_") ||
-        normalized.startsWith("INCIDENT_")
-      ) {
-        void loadSafety();
-        void loadDashboard();
+      if (normalized === "SOS_TRIGGERED" || normalized.startsWith("SAFETY_") || normalized.startsWith("INCIDENT_")) {
+        if (["safety", "liveOperations"].includes(currentScreen)) void loadSafety();
+        else if (isDashboard) void loadDashboard();
         return;
       }
 
-      if (
-        normalized === "PAYMENT_COMPLETED" ||
-        normalized.startsWith("PAYMENT_")
-      ) {
-        void loadOperationsData();
-        void loadDashboard();
+      if (normalized === "PAYMENT_COMPLETED" || normalized.startsWith("PAYMENT_")) {
+        if (currentScreen === "payments") void loadPaymentsData();
+        else if (isDashboard) void loadDashboard();
       }
     },
-    [
-      loadBookings,
-      loadDashboard,
-      loadDrivers,
-      loadOperationsData,
-      loadSafety,
-    ],
+    [adminAccess?.isSuperAdmin, currentScreen, loadBookings, loadDashboard, loadDrivers, loadPaymentsData, loadSafety],
   );
+
 
   const connectAdminRealtime = useCallback(() => {
     if (!connected || !adminRecordId) {
@@ -3306,17 +3467,15 @@ function App() {
     if (!connected) return;
 
     const refreshLiveData = () => {
-      void loadDashboard();
-      if (
-        currentScreen === "liveOperations" ||
-        currentScreen === "bookings" ||
-        currentScreen === "drivers" ||
-        currentScreen === "safety" ||
-        currentScreen === "matching"
-      ) {
-        void loadBookings();
-        void loadDrivers(true);
-        void loadSafety();
+      switch (currentScreen) {
+        case "dashboard": void loadDashboard(); break;
+        case "liveOperations":
+        case "matching":
+        case "bookings": void loadBookings(); void loadDrivers(true); break;
+        case "drivers": void loadDrivers(true); break;
+        case "safety": void loadSafety(); break;
+        case "adminPresence": if (adminAccess?.isSuperAdmin) void loadAdminPresence(); break;
+        default: break;
       }
     };
 
@@ -3333,14 +3492,47 @@ function App() {
   ]);
 
   useEffect(() => {
-    if (connected && currentScreen === "settings") void loadIntegrationStatus();
-  }, [connected, currentScreen, loadIntegrationStatus]);
+    if (!connected || !adminAccess) return;
+    if (!isScreenAllowed(adminAccess.role, currentScreen)) {
+      if (currentScreen !== "dashboard") {
+        setCurrentScreen("dashboard");
+        try { sessionStorage.setItem("ridex-current-screen", "dashboard"); } catch {}
+      }
+      return;
+    }
+
+    switch (currentScreen) {
+      case "dashboard": void loadDashboard(); break;
+      case "liveOperations":
+      case "matching": void loadBookings(); void loadDrivers(); break;
+      case "quickRide": void loadCustomers(); void loadDrivers(true); void loadQuickLocations(); break;
+      case "bookings": void loadBookings(); break;
+      case "drivers": void loadDrivers(); break;
+      case "customers": void loadCustomers(); break;
+      case "safety": void loadSafety(); break;
+      case "admins": void loadAdmins(); break;
+      case "roles": void loadRoles(); break;
+      case "audit": void loadAuditLogs(); break;
+      case "quickLocations": void loadQuickLocations(); break;
+      case "reports": void loadBookings(); void loadDrivers(true); break;
+      case "settings": void loadIntegrationStatus(); break;
+      case "routes": void loadSharedRoutes(); break;
+      case "setup": if (RIDEX_TEST_MODE) void loadTestData(); break;
+      case "platform": void loadPlatformState(); break;
+      case "payments": void loadPaymentsData(); break;
+      case "promotions": void loadPromotionsData(); break;
+      case "support": void loadSupportData(); break;
+      case "adminPresence": void loadAdminPresence(); break;
+      default: break;
+    }
+  }, [connected, adminAccess, currentScreen, loadDashboard, loadBookings, loadDrivers, loadCustomers, loadSafety, loadAdmins, loadRoles, loadAuditLogs, loadQuickLocations, loadIntegrationStatus, loadSharedRoutes, loadTestData, loadPlatformState, loadPaymentsData, loadPromotionsData, loadSupportData, loadAdminPresence]);
 
   useEffect(() => {
-    if (connected && currentScreen === "routes") {
-      void loadSharedRoutes();
-    }
-  }, [connected, currentScreen, loadSharedRoutes]);
+    if (!connected || !adminAccess?.isSuperAdmin || currentScreen !== "adminPresence") return;
+    const timer = window.setInterval(() => void loadAdminPresence(), 30000);
+    return () => window.clearInterval(timer);
+  }, [connected, adminAccess?.isSuperAdmin, currentScreen, loadAdminPresence]);
+
 
   useEffect(() => {
     if (!connected) {
@@ -3352,15 +3544,6 @@ function App() {
     const cleanup = connectAdminRealtime();
     return cleanup;
   }, [connected, connectAdminRealtime]);
-
-  useEffect(() => {
-    if (connected && currentScreen === "setup" && RIDEX_TEST_MODE) void loadTestData();
-    if (connected && currentScreen === "platform") void loadPlatformState();
-  }, [connected, currentScreen, loadTestData, loadPlatformState]);
-
-  useEffect(() => {
-    if (connected && ["payments", "promotions", "support"].includes(currentScreen)) void loadOperationsData();
-  }, [connected, currentScreen, loadOperationsData]);
 
   useEffect(() => {
     const selectedRole =
@@ -3385,8 +3568,13 @@ function App() {
   const navigate = (
     screen: Screen
   ) => {
+    if (adminAccess && !isScreenAllowed(adminAccess.role, screen)) {
+      showToast("error", "This workspace is not available for your Admin role.");
+      return;
+    }
     setCurrentScreen(screen);
     sessionStorage.setItem('ridex-current-screen', screen);
+    setMobileNavOpen(false);
     window.scrollTo({
       top: 0,
       behavior: "smooth",
@@ -3485,6 +3673,7 @@ function App() {
       saveStoredAdminRecordId(adminId);
       setAdminUserId(userId);
       setAdminRecordId(adminId);
+      await loadAdminContext(token);
       setConnected(true);
       setSessionValidated(true);
       setAdminOtp("");
@@ -3521,6 +3710,8 @@ function App() {
     saveStoredAdminToken("");
     setAdminUserId("");
     setAdminRecordId("");
+    setAdminAccess(null);
+    setAdminPresenceRows([]);
     setConnected(false);
     setAdminOtp("");
     setTestOtp("");
@@ -4152,12 +4343,26 @@ function App() {
       return (
         <div className="page">
           <SectionHeader
-            title="Dashboard"
-            subtitle="RideX operational overview"
-            onRefresh={
-              loadDashboard
-            }
+            title={`${adminAccess?.role ? humanize(adminAccess.role) : "Admin"} Workspace`}
+            subtitle="Role-aware RideX work dashboard. Tools and data stay within the authorized Admin scope."
+            onRefresh={loadDashboard}
+            right={<span className="tag emphasis">{adminAccess?.isSuperAdmin ? "FULL COMMAND CENTER" : "ROLE WORKSPACE"}</span>}
           />
+
+          {adminAccess ? (
+            <Panel title="My Work Tools" subtitle="Open only the tools required for your assigned work. Backend permissions remain authoritative.">
+              <div className="content-grid two">
+                {(ROLE_TOOLBOX[adminAccess.role] ?? ROLE_TOOLBOX.OPERATIONS).map((tool) => (
+                  <button key={tool.screen} type="button" className="panel" style={{textAlign:"left",cursor:"pointer",border:"1px solid rgba(15,23,42,.08)"}} onClick={() => navigate(tool.screen)}>
+                    <div style={{display:"flex",gap:12,alignItems:"flex-start"}}>
+                      <span className="nav-icon"><AppIcon name={tool.icon} size={18} /></span>
+                      <div><strong>{tool.label}</strong><div className="cell-sub" style={{marginTop:4}}>{tool.description}</div></div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </Panel>
+          ) : null}
 
           {dashboardLoading ? (
             <LoadingState message="Loading dashboard…" />
@@ -4168,6 +4373,7 @@ function App() {
             />
           ) : dashboard ? (
             <>
+              {adminAccess?.isSuperAdmin ? (
               <div className="metrics-grid">
                 <MetricCard
                   label="Customers"
@@ -4321,6 +4527,11 @@ function App() {
                 />
               </div>
 
+              ) : (
+                <div className="info-box"><strong>Today's Work</strong><p>Your dashboard stays focused on your assigned workspace. Open a tool above to load only the related API data.</p></div>
+              )}
+
+              {adminAccess?.isSuperAdmin ? (
               <div className="content-grid two">
                 <div className="panel">
                   <div className="panel-header">
@@ -4454,6 +4665,7 @@ function App() {
                   </div>
                 </div>
               </div>
+              ) : null}
             </>
           ) : (
             <EmptyState
@@ -6422,6 +6634,13 @@ function App() {
                 <label>
                   <span className="field-label">Operating Region / City</span>
                   <input className="text-input" value={newAdminForm.operatingRegion} onChange={(event) => setNewAdminForm(current => ({...current, operatingRegion: event.target.value}))} placeholder="Region / city" />
+                  {newAdminForm.operatingRegion.trim() ? (
+                    <div className="info-box" style={{marginTop:6}}>
+                      <strong>Suggested working location</strong>
+                      <p>{newAdminForm.operatingRegion.trim()}</p>
+                      <button className="button secondary small" type="button" onClick={() => setNewAdminForm(current => ({...current, workingLocation: current.workingLocation || current.operatingRegion}))}>Use suggestion</button>
+                    </div>
+                  ) : null}
                 </label>
 
                 <label>
@@ -6480,6 +6699,16 @@ function App() {
                     )}
                   </select>
                 </label>
+
+                <div className="info-box">
+                  <strong>RIDEX-REF-APK-UI-001 · Role suggestion</strong>
+                  <p>Department can suggest the closest RideX Admin role; Admin approval and backend RBAC remain authoritative.</p>
+                  <button className="button secondary small" type="button" onClick={() => {
+                    const department = newAdminForm.department.trim().toUpperCase();
+                    const suggested = department === "FINANCE" ? "FINANCE" : department === "SAFETY" ? "SAFETY" : department === "SUPPORT" ? "SUPPORT" : department.includes("KYC") || department.includes("VERIFICATION") ? "VERIFICATION_KYC" : "OPERATIONS";
+                    setNewAdminForm(current => ({...current, role: suggested, requestedRole: suggested}));
+                  }}>Use role suggestion</button>
+                </div>
 
                 <button
                   className="button primary"
@@ -8092,32 +8321,52 @@ function App() {
     );
   };
 
-  const renderQuickRide = () => (
-    <div className="page">
-      <SectionHeader title="Quick Ride Create" subtitle="Admin-created/manual booking for operations and support" />
-      <div className="content-grid two">
-        <Panel title="Ride Details" subtitle="Backend-authoritative manual booking">
-          <div className="detail-grid">
-            <label><span className="field-label">Customer ID</span><input className="text-input" placeholder="Customer ID" /></label>
-            <label><span className="field-label">Service Type</span><select className="select-input" defaultValue="PASSENGER"><option>PASSENGER</option><option>PARCEL</option><option>GOODS</option></select></label>
-            <label><span className="field-label">Pickup</span><input className="text-input" placeholder="Pickup location" /></label>
-            <label><span className="field-label">Drop</span><input className="text-input" placeholder="Drop location" /></label>
-            <label><span className="field-label">Ride Type</span><select className="select-input" defaultValue="FULL_RIDE"><option>FULL_RIDE</option><option>SHARED_RIDE</option><option>CONNECTION_RIDE</option></select></label>
-            <label><span className="field-label">Payment Method</span><select className="select-input" defaultValue="CASH"><option>CASH</option><option>UPI</option><option>WALLET</option></select></label>
-          </div>
-          <button className="button secondary" type="button" disabled><AppIcon name="plus" size={15} /> Create Ride — backend booking endpoint required</button>
-          <div className="info-box"><strong>No fake booking</strong><p>This Admin screen does not fabricate a booking or fare. Final creation must call the supplied backend booking/command endpoint so validation, pricing, payment and audit rules remain backend-authoritative.</p></div>
-        </Panel>
-        <Panel title="Driver / Vehicle" subtitle="Optional assignment; matching remains backend-controlled">
-          <div className="detail-grid">
-            <label><span className="field-label">Driver</span><select className="select-input" defaultValue="auto"><option value="auto">Auto Match</option></select></label>
-            <label><span className="field-label">Vehicle</span><select className="select-input" defaultValue="auto"><option value="auto">Auto Select</option><option>E_RICKSHAW</option><option>PICKUP_TRUCK</option></select></label>
-          </div>
-          <div className="info-box"><strong>Compatibility rule</strong><p>Passenger → E-Rickshaw only. Parcel → Passenger E-Rickshaw only. Goods → Battery Pickup Truck only.</p></div>
-        </Panel>
+  const renderQuickRide = () => {
+    const pickupMatches = quickLocations.filter((location) => {
+      if (!location.isActive) return false;
+      const query = quickRideDraft.pickup.trim().toLowerCase();
+      if (!query) return true;
+      return `${location.name ?? ""} ${location.address ?? ""}`.toLowerCase().includes(query);
+    }).slice(0, 5);
+
+    const vehicleSuggestion = quickRideDraft.serviceType === "GOODS"
+      ? "PICKUP_TRUCK"
+      : quickRideDraft.serviceType === "PARCEL"
+        ? "E_RICKSHAW"
+        : "E_RICKSHAW";
+
+    return (
+      <div className="page">
+        <SectionHeader title="Quick Ride Create" subtitle="Admin-created/manual booking for operations and support" />
+        <div className="content-grid two">
+          <Panel title="Ride Details" subtitle="Backend-authoritative manual booking">
+            <div className="detail-grid">
+              <label><span className="field-label">Customer ID</span><input className="text-input" value={quickRideDraft.customerId} onChange={(e) => setQuickRideDraft((d) => ({...d, customerId:e.target.value}))} placeholder="Customer ID" /></label>
+              <label><span className="field-label">Service Type</span><select className="select-input" value={quickRideDraft.serviceType} onChange={(e) => setQuickRideDraft((d) => ({...d, serviceType:e.target.value}))}><option>PASSENGER</option><option>PARCEL</option><option>GOODS</option></select></label>
+              <label>
+                <span className="field-label">Pickup</span>
+                <input className="text-input" value={quickRideDraft.pickup} onChange={(e) => setQuickRideDraft((d) => ({...d, pickup:e.target.value}))} placeholder="Pickup location" />
+                {pickupMatches.length ? <div style={{marginTop:6}}><div className="cell-sub">Suggested Quick Locations</div>{pickupMatches.map((location) => <button key={location.id} type="button" className="list-row" style={{width:"100%",cursor:"pointer",border:0,background:"transparent"}} onClick={() => setQuickRideDraft((d) => ({...d,pickup:location.name ?? location.address ?? ""}))}><strong>{location.name ?? "Unnamed location"}</strong><span>{location.address ?? ""}</span></button>)}</div> : null}
+              </label>
+              <label><span className="field-label">Drop</span><input className="text-input" value={quickRideDraft.drop} onChange={(e) => setQuickRideDraft((d) => ({...d, drop:e.target.value}))} placeholder="Drop location" /></label>
+              <label><span className="field-label">Ride Type</span><select className="select-input" value={quickRideDraft.rideType} onChange={(e) => setQuickRideDraft((d) => ({...d, rideType:e.target.value}))}><option>FULL_RIDE</option><option>SHARED_RIDE</option><option>CONNECTION_RIDE</option></select></label>
+              <label><span className="field-label">Payment Method</span><select className="select-input" value={quickRideDraft.paymentMethod} onChange={(e) => setQuickRideDraft((d) => ({...d, paymentMethod:e.target.value}))}><option>CASH</option><option>UPI</option><option>WALLET</option></select></label>
+            </div>
+            <button className="button secondary" type="button" disabled><AppIcon name="plus" size={15} /> Create Ride — backend booking endpoint required</button>
+            <div className="info-box"><strong>RIDEX-REF-APK-FEAT-001 · Contextual suggestions</strong><p>Pickup suggestions use the active RideX Quick Locations catalogue. Vehicle suggestions follow the existing RideX service compatibility rule.</p></div>
+          </Panel>
+
+          <Panel title="Driver / Vehicle" subtitle="Optional assignment; matching remains backend-controlled">
+            <div className="detail-grid">
+              <label><span className="field-label">Driver</span><select className="select-input" value={quickRideDraft.driverId} onChange={(e) => setQuickRideDraft((d) => ({...d, driverId:e.target.value}))}><option value="auto">Auto Match</option>{drivers.filter((driver) => String(driver.driverStatus ?? "").toUpperCase() === "ONLINE").slice(0,50).map((driver) => <option key={driver.id} value={driver.id}>{driver.fullName ?? driver.id}</option>)}</select></label>
+              <label><span className="field-label">Vehicle</span><select className="select-input" value={quickRideDraft.vehicleType} onChange={(e) => setQuickRideDraft((d) => ({...d, vehicleType:e.target.value}))}><option value="auto">Auto Select</option><option>E_RICKSHAW</option><option>PICKUP_TRUCK</option></select></label>
+            </div>
+            <div className="info-box"><strong>Suggested vehicle</strong><p>{vehicleSuggestion} · Based on Service Type = {quickRideDraft.serviceType}</p><button className="button secondary small" type="button" onClick={() => setQuickRideDraft((d) => ({...d,vehicleType:vehicleSuggestion}))}>Use suggestion</button></div>
+          </Panel>
+        </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   const loadPricingRules = useCallback(async () => {
     try { const r = await apiRequest<any[]>("/admin/platform/pricing-rules"); setPricingRules(Array.isArray(r.data)?r.data:[]); } catch(e) { showToast("error", e instanceof Error ? e.message : "Unable to load pricing rules"); }
@@ -8171,7 +8420,7 @@ function App() {
 
   const renderPayments = () => (
     <div className="page">
-      <SectionHeader title="Payments & Settlement" subtitle="Live payment records from the RideX backend" onRefresh={() => void loadOperationsData()} />
+      <SectionHeader title="Payments & Settlement" subtitle="Live payment records from the RideX backend" onRefresh={() => void loadPaymentsData()} />
       <Panel title="Payments" subtitle={operationLoading ? "Refreshing…" : `${paymentRows.length} records`}>
         <div className="table-wrapper"><table><thead><tr><th>Payment</th><th>Booking</th><th>Customer</th><th>Method</th><th>Amount</th><th>Status</th><th>Created</th></tr></thead><tbody>{paymentRows.map((row) => <tr key={row.id}><td>{row.id}</td><td>{row.bookingId}</td><td>{row.customer?.user?.mobile || row.customerId}</td><td>{row.method}</td><td>₹{Number(row.amount || 0).toFixed(2)}</td><td><StatusBadge value={row.status}/></td><td>{formatDate(row.createdAt)}</td></tr>)}{paymentRows.length===0?<tr><td colSpan={7}>No payments found.</td></tr>:null}</tbody></table></div>
       </Panel>
@@ -8180,8 +8429,8 @@ function App() {
 
   const renderPromotions = () => (
     <div className="page">
-      <SectionHeader title="Promotions" subtitle="Live coupons and campaign controls" onRefresh={() => void loadOperationsData()} actions={<button className="button primary" type="button" onClick={() => void createPromotion()}><Plus size={15}/> Create Promotion</button>} />
-      <div className="content-grid two">{promotionRows.map((row) => <Panel key={row.id} title={row.code} subtitle={row.description || "Promotion"}><StatusBadge value={row.isActive ? "Active" : "Inactive"}/><div className="detail-grid"><div><span className="field-label">Discount</span><strong>{row.discountType === "PERCENTAGE" ? `${row.discountValue}%` : `₹${row.discountValue}`}</strong></div><div><span className="field-label">Usage</span><strong>{row.usageCount ?? 0}</strong></div></div><button className="button secondary small" type="button" onClick={() => void apiRequest(`/admin/promotions/${row.id}`, {method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({isActive:!row.isActive})}).then(()=>loadOperationsData())}> {row.isActive ? "Deactivate" : "Activate"}</button></Panel>)}{promotionRows.length===0?<Panel title="No promotions"><p>No live promotions found.</p></Panel>:null}</div>
+      <SectionHeader title="Promotions" subtitle="Live coupons and campaign controls" onRefresh={() => void loadPromotionsData()} actions={<button className="button primary" type="button" onClick={() => void createPromotion()}><Plus size={15}/> Create Promotion</button>} />
+      <div className="content-grid two">{promotionRows.map((row) => <Panel key={row.id} title={row.code} subtitle={row.description || "Promotion"}><StatusBadge value={row.isActive ? "Active" : "Inactive"}/><div className="detail-grid"><div><span className="field-label">Discount</span><strong>{row.discountType === "PERCENTAGE" ? `${row.discountValue}%` : `₹${row.discountValue}`}</strong></div><div><span className="field-label">Usage</span><strong>{row.usageCount ?? 0}</strong></div></div><button className="button secondary small" type="button" onClick={() => void apiRequest(`/admin/promotions/${row.id}`, {method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({isActive:!row.isActive})}).then(()=>loadPromotionsData())}> {row.isActive ? "Deactivate" : "Activate"}</button></Panel>)}{promotionRows.length===0?<Panel title="No promotions"><p>No live promotions found.</p></Panel>:null}</div>
     </div>
   );
 
@@ -8190,7 +8439,7 @@ function App() {
       <SectionHeader
         title="Support & Disputes"
         subtitle="RBAC-protected support inbox with case conversation and Admin replies"
-        onRefresh={() => void loadOperationsData()}
+        onRefresh={() => void loadSupportData()}
       />
       <div className="metrics-grid">
         <MetricCard
@@ -8298,7 +8547,7 @@ function App() {
                                 }),
                               },
                             )
-                              .then(() => loadOperationsData())
+                              .then(() => loadSupportData())
                               .catch((error) =>
                                 showToast(
                                   "error",
@@ -8366,6 +8615,92 @@ function App() {
         </div>
       );
     };
+
+  const renderAdminPresence = () => {
+    const onlineCount = adminPresenceRows.filter((row) => row.status === "ONLINE").length;
+    const offlineCount = adminPresenceRows.length - onlineCount;
+
+    const revokeSession = async (sessionId: string) => {
+      const confirmationText = window.prompt("Type REVOKE SESSION to continue.");
+      if (confirmationText !== "REVOKE SESSION") return;
+      try {
+        await apiRequest(`/admin/admin-presence/sessions/${encodeURIComponent(sessionId)}`, {
+          method: "DELETE",
+          body: JSON.stringify({ confirmation: "REVOKE SESSION" }),
+        });
+        showToast("success", "Admin session revoked.");
+        await loadAdminPresence();
+      } catch (error) {
+        showToast("error", error instanceof Error ? error.message : "Unable to revoke Admin session");
+      }
+    };
+
+    const revokeAllSessions = async (adminId: string) => {
+      const confirmationText = window.prompt("Type REVOKE ALL SESSIONS to continue.");
+      if (confirmationText !== "REVOKE ALL SESSIONS") return;
+      try {
+        await apiRequest(`/admin/admin-presence/admins/${encodeURIComponent(adminId)}/revoke-all`, {
+          method: "POST",
+          body: JSON.stringify({ confirmation: "REVOKE ALL SESSIONS" }),
+        });
+        showToast("success", "All sessions for the Admin were revoked.");
+        await loadAdminPresence();
+      } catch (error) {
+        showToast("error", error instanceof Error ? error.message : "Unable to revoke Admin sessions");
+      }
+    };
+
+    return (
+      <div className="page">
+        <SectionHeader
+          title="Admin Presence & Sessions"
+          subtitle="Super Admin-only view of Admin identity, sessions, login source and recent activity"
+          onRefresh={loadAdminPresence}
+          right={<span className="api-pill"><span className="online-dot" /> Server session data</span>}
+        />
+        {adminPresenceLoading ? <LoadingState message="Loading Admin sessions…" /> : null}
+        {adminPresenceError ? <ErrorState message={adminPresenceError} onRetry={loadAdminPresence} /> : null}
+
+        <div className="metrics-grid">
+          <MetricCard label="Sessions" value={formatNumber(adminPresenceRows.length)} icon="admin" />
+          <MetricCard label="Online" value={formatNumber(onlineCount)} icon="activity" tone="success" />
+          <MetricCard label="Offline" value={formatNumber(offlineCount)} icon="close" tone="danger" />
+        </div>
+
+        <Panel title="Admin Sessions" subtitle="Green = recently active server-side session; red = offline, expired or revoked">
+          <div className="table-wrapper">
+            <table>
+              <thead>
+                <tr><th>Status</th><th>Admin</th><th>Mobile</th><th>Role</th><th>Login Source</th><th>Login Time</th><th>Last Seen</th><th>Session</th><th>Action</th></tr>
+              </thead>
+              <tbody>
+                {adminPresenceRows.length === 0 ? (
+                  <tr><td colSpan={9}>No Admin session records returned.</td></tr>
+                ) : adminPresenceRows.map((row) => (
+                  <tr key={`${row.adminId}-${row.sessionId}`}>
+                    <td><span className={`status ${row.status === "ONLINE" ? "success" : "danger"}`}><span className="online-dot" /> {row.status}</span></td>
+                    <td><strong>{row.name || "—"}</strong><div className="cell-sub">{row.onlineReason}</div></td>
+                    <td>{row.mobile || "—"}</td>
+                    <td><span className="tag emphasis">{humanize(row.role)}</span></td>
+                    <td><div className="cell-stack"><span>{row.deviceInfo || "Unknown device"}</span><span className="cell-sub">IP: {row.ipAddress || "—"}</span></div></td>
+                    <td>{formatDate(row.createdAt)}</td>
+                    <td>{formatDate(row.lastSeenAt)}</td>
+                    <td><div className="cell-stack"><span>{row.revokedAt ? "REVOKED" : row.expiresAt && new Date(row.expiresAt).getTime() <= Date.now() ? "EXPIRED" : "ACTIVE"}</span><span className="cell-sub">{shortId(row.sessionId, 18)}</span></div></td>
+                    <td>
+                      <div className="button-row">
+                        {row.sessionId && !row.revokedAt ? <button className="button danger-button small" type="button" onClick={() => void revokeSession(row.sessionId)}>Revoke</button> : null}
+                        <button className="button secondary small" type="button" onClick={() => void revokeAllSessions(row.adminId)}>Revoke all</button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Panel>
+      </div>
+    );
+  };
 
   const renderCurrentScreen =
     () => {
@@ -8437,6 +8772,8 @@ function App() {
           return renderSetup();
         case "platform":
           return renderPlatform();
+        case "adminPresence":
+          return adminAccess?.isSuperAdmin ? renderAdminPresence() : renderDashboard();
 
         default:
           return renderDashboard();
@@ -8664,40 +9001,18 @@ function App() {
         </div>
 
         <nav className="nav-list">
-          {NAV_ITEMS.map(
-            (item) => (
-              <button
-                key={item.id}
-                className={`nav-item ${
-                  currentScreen ===
-                  item.id
-                    ? "active"
-                    : ""
-                }`}
-                type="button"
-                onClick={() =>
-                  navigate(
-                    item.id
-                  )
-                }
-                title={
-                  compactSidebar
-                    ? item.label
-                    : undefined
-                }
-              >
-                <span className="nav-icon">
-                  <AppIcon name={item.icon} size={17} />
-                </span>
-
-                {!compactSidebar ? (
-                  <span>
-                    {item.label}
-                  </span>
-                ) : null}
-              </button>
-            )
-          )}
+          {NAV_ITEMS.filter((item) => isScreenAllowed(adminAccess?.role, item.id)).map((item) => (
+            <button
+              key={item.id}
+              className={`nav-item ${currentScreen === item.id ? "active" : ""}`}
+              type="button"
+              onClick={() => navigate(item.id)}
+              title={compactSidebar ? item.label : undefined}
+            >
+              <span className="nav-icon"><AppIcon name={item.icon} size={17} /></span>
+              {!compactSidebar ? <span>{item.label}</span> : null}
+            </button>
+          ))}
         </nav>
 
         <div className="sidebar-footer">
@@ -8713,10 +9028,7 @@ function App() {
                       : "Offline"}
                 </strong>
                 <span>
-                  {shortId(
-                    adminUserId,
-                    22
-                  )}
+                  {adminAccess?.role ? humanize(adminAccess.role) : shortId(adminUserId, 22)}
                 </span>
               </div>
             </div>
