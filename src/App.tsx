@@ -707,6 +707,7 @@ const RIDEX_OPTIONAL_CONFIG = {
 };
 
 const ADMIN_ID_STORAGE_KEY = "ridex_admin_user_id";
+const ADMIN_RECORD_ID_STORAGE_KEY = "ridex_admin_record_id";
 const ADMIN_AUTH_TOKEN_STORAGE_KEY = "ridex_admin_auth_token_v1";
 const RIDEX_TEST_MODE = String((import.meta as any)?.env?.VITE_RIDEX_TEST_MODE ?? "false").toLowerCase() === "true";
 const ADMIN_LOGIN_PURPOSE = "ADMIN.AUTH.LOGIN";
@@ -800,6 +801,26 @@ function saveStoredAdminId(value: string) {
       );
     } else {
       localStorage.removeItem(ADMIN_ID_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
+function getStoredAdminRecordId() {
+  try {
+    return localStorage.getItem(ADMIN_RECORD_ID_STORAGE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function saveStoredAdminRecordId(value: string) {
+  try {
+    if (value.trim()) {
+      localStorage.setItem(ADMIN_RECORD_ID_STORAGE_KEY, value.trim());
+    } else {
+      localStorage.removeItem(ADMIN_RECORD_ID_STORAGE_KEY);
     }
   } catch {
     // Ignore storage failures.
@@ -1587,14 +1608,14 @@ function App() {
   });
 
   const [
-    apiBaseUrl,
-    setApiBaseUrl,
-  ] = useState(DEFAULT_API_BASE);
-
-  const [
     adminUserId,
     setAdminUserId,
   ] = useState(getStoredAdminId());
+
+  const [
+    adminRecordId,
+    setAdminRecordId,
+  ] = useState(getStoredAdminRecordId());
 
   const [
     connected,
@@ -1949,13 +1970,7 @@ function App() {
     setServerMessage,
   ] = useState("");
 
-  const effectiveApiBase = useMemo(
-    () =>
-      apiBaseUrl
-        .trim()
-        .replace(/\/+$/, ""),
-    [apiBaseUrl]
-  );
+  const effectiveApiBase = DEFAULT_API_BASE;
 
   const showToast = useCallback(
     (
@@ -2021,7 +2036,9 @@ function App() {
           if (response.status === 401) {
             saveStoredAdminToken("");
             saveStoredAdminId("");
+            saveStoredAdminRecordId("");
             setAdminUserId("");
+            setAdminRecordId("");
             setConnected(false);
             showToast(
               "error",
@@ -2961,12 +2978,34 @@ function App() {
         });
         if (!response.ok) throw new Error("SESSION_INVALID");
         const data = await response.json().catch(() => ({}));
-        if (!data?.success || String(data?.data?.userType || "").toUpperCase() !== "ADMIN") throw new Error("SESSION_INVALID");
-        if (!cancelled) setConnected(true);
+        if (
+          !data?.success ||
+          String(data?.data?.userType || "").toUpperCase() !== "ADMIN"
+        ) {
+          throw new Error("SESSION_INVALID");
+        }
+
+        const resolvedUserId = String(data?.data?.userId ?? "").trim();
+        const resolvedAdminId = String(data?.data?.adminId ?? "").trim();
+
+        if (!resolvedUserId || !resolvedAdminId) {
+          throw new Error("ADMIN_IDENTITY_INCOMPLETE");
+        }
+
+        if (!cancelled) {
+          saveStoredAdminId(resolvedUserId);
+          saveStoredAdminRecordId(resolvedAdminId);
+          setAdminUserId(resolvedUserId);
+          setAdminRecordId(resolvedAdminId);
+          setConnected(true);
+        }
       } catch {
         if (!cancelled) {
           saveStoredAdminToken("");
           saveStoredAdminId("");
+          saveStoredAdminRecordId("");
+          setAdminUserId("");
+          setAdminRecordId("");
           setConnected(false);
         }
       } finally {
@@ -3051,7 +3090,7 @@ function App() {
   );
 
   const connectAdminRealtime = useCallback(() => {
-    if (!connected || !adminUserId) {
+    if (!connected || !adminRecordId) {
       setRealtimeStatus("offline");
       return () => undefined;
     }
@@ -3059,12 +3098,8 @@ function App() {
     let stopped = false;
     let retryDelayMs = 1_000;
 
-    const resolvedActorId =
-      adminUsers.find(
-        (admin) =>
-          String(admin.id ?? "") === String(adminUserId) ||
-          String(admin.userId ?? "") === String(adminUserId),
-      )?.id ?? adminUserId;
+    // Realtime ADMIN actorId must be AdminUser.id, not User.id.
+    const resolvedActorId = adminRecordId;
 
     const parseSseBlock = (block: string) => {
       let eventId = "";
@@ -3154,15 +3189,26 @@ function App() {
             },
           );
 
-          if (response.status === 401 || response.status === 403) {
+          if (response.status === 401) {
             saveStoredAdminToken("");
             saveStoredAdminId("");
+            saveStoredAdminRecordId("");
             setAdminUserId("");
+            setAdminRecordId("");
             setConnected(false);
             setRealtimeStatus("offline");
             showToast(
               "error",
-              "Realtime authorization expired. Please sign in again.",
+              "Admin session expired or is invalid. Please sign in again.",
+            );
+            break;
+          }
+
+          if (response.status === 403) {
+            setRealtimeStatus("offline");
+            showToast(
+              "error",
+              "Admin realtime authorization denied. Your session is still active.",
             );
             break;
           }
@@ -3249,8 +3295,7 @@ function App() {
       realtimeAbortRef.current = null;
     };
   }, [
-    adminUserId,
-    adminUsers,
+    adminRecordId,
     connected,
     effectiveApiBase,
     refreshForRealtimeEvent,
@@ -3429,10 +3474,17 @@ function App() {
       if (!response.ok || data.success === false) throw new Error(data.message || "Invalid admin OTP");
       const token = String(data.data?.token || "").trim();
       const userId = String(data.data?.userId || "").trim();
-      if (!token || !userId) throw new Error("Admin session was not returned by backend");
+      const adminId = String(data.data?.adminId || "").trim();
+
+      if (!token || !userId || !adminId) {
+        throw new Error("Admin session identity was not returned by backend");
+      }
+
       saveStoredAdminToken(token);
       saveStoredAdminId(userId);
+      saveStoredAdminRecordId(adminId);
       setAdminUserId(userId);
+      setAdminRecordId(adminId);
       setConnected(true);
       setSessionValidated(true);
       setAdminOtp("");
@@ -3465,8 +3517,10 @@ function App() {
     setRealtimeStatus("offline");
     setRealtimeLastEvent(null);
     saveStoredAdminId("");
+    saveStoredAdminRecordId("");
     saveStoredAdminToken("");
     setAdminUserId("");
+    setAdminRecordId("");
     setConnected(false);
     setAdminOtp("");
     setTestOtp("");
@@ -6467,11 +6521,12 @@ function App() {
 
                 <div>
                   <span>
-                    API Base
+                    Admin Record ID
                   </span>
 
-                  <strong className="wrap">
-                    {effectiveApiBase}
+                  <strong>
+                    {adminRecordId ||
+                      "—"}
                   </strong>
                 </div>
 
@@ -8419,7 +8474,7 @@ function App() {
               </h2>
 
               <p>
-                Verify the approved Admin mobile with OTP to establish a backend-issued secure session.
+                Verify the approved Admin mobile with one active OTP to establish a backend-issued secure session.
               </p>
 
               {RIDEX_TEST_MODE || testOtp ? (
@@ -8452,24 +8507,6 @@ function App() {
                 void verifyAdminOtp();
               }}
             >
-              <label>
-                <span className="field-label">
-                  Backend API Base URL
-                </span>
-
-                <input
-                  className="text-input"
-                  value={apiBaseUrl}
-                  onChange={(event) =>
-                    setApiBaseUrl(
-                      event.target
-                        .value
-                    )
-                  }
-                  placeholder="http://localhost:4000/api/v1"
-                />
-              </label>
-
               <label><span className="field-label">Admin Mobile</span><input className="text-input" value={adminMobile} onChange={(event) => { setAdminMobile(event.target.value.replace(/\D/g, "").slice(0, 10)); setTestOtp(""); }} inputMode="numeric" placeholder="10-digit admin mobile" autoFocus /></label>
               <label><span className="field-label">OTP</span><input className="text-input" value={adminOtp} onChange={(event) => setAdminOtp(event.target.value.replace(/\D/g, "").slice(0, 4))} inputMode="numeric" placeholder="4-digit OTP" /></label>
 
@@ -8564,6 +8601,11 @@ function App() {
               <div style={{display:"flex",gap:10}}>
                 <button className="button secondary large" type="button" onClick={() => void sendAdminOtp()} disabled={adminAuthLoading}>Send OTP</button>
                 <button className="button primary large" type="button" onClick={() => void verifyAdminOtp()} disabled={adminAuthLoading}>Verify & Connect</button>
+              </div>
+
+              <div className="login-note" style={{marginTop: 12}}>
+                <strong>OTP security</strong>
+                <span>Only one active ADMIN.AUTH.LOGIN OTP is used at a time. A new OTP request replaces the previous active OTP according to backend OTP rules.</span>
               </div>
             </form>
 
